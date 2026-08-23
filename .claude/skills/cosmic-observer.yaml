@@ -1,0 +1,150 @@
+name: cosmic-observer
+description: >
+  Orbital mechanics, space domain awareness, collision avoidance,
+  launch window optimization, TLE/SGP4 propagation, and satellite
+  computer vision. Trigger when user asks about satellites, orbits,
+  collision risks, launch windows, space traffic management,
+  or building the Cosmic Observer platform.
+
+version: 1.0.0
+author: kullanici
+
+triggers:
+  - "yörünge mekaniği"
+  - "orbital mechanics"
+  - "TLE"
+  - "SGP4"
+  - "çarpışma önleme"
+  - "collision avoidance"
+  - "fırlatma penceresi"
+  - "launch window"
+  - "uzay trafik yönetimi"
+  - "space traffic management"
+  - "uydu takibi"
+  - "satellite tracking"
+  - "COSMIC OBSERVER"
+  - "space domain awareness"
+
+instructions: |
+  # COSMIC OBSERVER - Alan Bilgisi Talimatları
+
+  Bu proje için aşağıdaki domain-specific kurallara uy:
+
+  ## 1. ORBITAL MECHANICS STANDARTLARI
+
+  ### Kullanılacak Sabitler:
+  - μ_Earth = 398600.4418 km³/s² (Dünya GM sabiti)
+  - R_Earth = 6378.137 km (ekvatoral yarıçap)
+  - J2 = 1.08262668 × 10⁻³
+  - ω_Earth = 7.2921159 × 10⁻⁵ rad/s (Dünya dönüş hızı)
+  - c = 299792.458 km/s
+
+  ### Propagasyon Hiyerarşisi:
+  1. SGP4 (skyfield/sgp4 kütüphanesi) → LEO/MEO/GEO için standart
+  2. Keplerian + J2 pertürbasyonu → eğitim/analiz amaçlı
+  3. Yüksek hassasiyetli → poliastro, Orekit, GMAT
+  4. NEO/gezegenler için → JPL Horizons, SPICE
+
+  ### Koordinat Sistemleri:
+  - TEME (True Equator Mean Equinox) → SGP4 çıktısı
+  - ECI (Earth-Centered Inertial) → çarpışma analizi
+  - ECEF (Earth-Centered Earth-Fixed) → Dünya haritası
+  - Geodetic (lat, lon, alt) → kullanıcı gösterimi
+  - Dönüşüm için GMST hesapla: θ = 280.46 + 360.99(JD - 2451545.0)
+
+  ## 2. ÇARPIŞMA ANALİZİ PROTOKOLÜ
+
+  ### Risk Eşikleri (NASA CARA standardı):
+  - Pc < 10⁻⁷ → Yeşil (ihmal edilebilir)
+  - 10⁻⁷ ≤ Pc < 10⁻⁴ → Sarı (izleme gerekli)
+  - Pc ≥ 10⁻⁴ → Kırmızı (manevra gerekli)
+
+  ### Hesaplama Yöntemleri:
+  - Ön tarama: apogee/perigee bandı filtresi
+  - Orta filtre: Mahalanobis mesafesi (d_M > 8 → ele)
+  - Detaylı: B-plane'de 2D kovaryans entegrasyonu
+  - Yöntemler: Alfriend-Akella, Foster, Chan
+  - Kovaryans: C_combined = C₁ + C₂
+
+  ### Minimum Mesafe Standartları:
+  - ISS koridoru: 50 × 50 × 4 km
+  - LEO operasyonel: 25 km uyarı, 10 km acil
+  - GEO: 75 km boylam ayrımı önerilir
+
+  ## 3. FIRLATMA PENCERESİ HESAPLAMA
+
+  ### Temel Kısıt:
+  cos(i) = cos(φ) · sin(Az)
+  → Enlemden düşük eğimli yörüngeye direkt ulaşılamaz
+
+  ### Fırlatma Rampası Özellikleri:
+  - Cape Canaveral: 28.5°N → min eğim 28.5°
+  - Kourou (Fransız Guyanası): 5.2°N → min eğim 5.2° (neredeyse ekvatoral)
+  - Baikonur: 46°N → min eğim 46° (ISS'ye 51.6° eğimle uyumlu)
+  - Vandenberg: 34.6°N → güneye fırlatma (polar/güneş-senkron)
+
+  ### Güneş-Senkron Yörünge (SSO):
+  - RAAN drift = 0.9856°/gün (Dünya'nın Güneş etrafındaki açısal hızı)
+  - LTAN sabitliği için: Ω̇_J2 = 0.9856°/gün olacak şekilde eğim-irtifa seç
+
+  ## 4. CV İÇİN UZAY GÖRÜNTÜLERİ
+
+  ### Zorluklar:
+  - Aşırı kontrast (parlak Dünya vs. siyah uzay)
+  - Güneş parlama/refleksiyon
+  - Düşük çözünürlük, hareket bulanıklığı
+  - Az etiketli veri
+
+  ### Ön İşleme Sırası:
+  1. Demosaicking (ham sensör verisi ise)
+  2. CLAHE (kontrast sınırlı histogram eşitleme)
+  3. Bilateral filter (kenar korumalı gürültü azaltma)
+  4. Solar flare maskesi
+
+  ### Model Seçimi:
+  - YOLOv8n → hızlı, edge device için
+  - YOLOv8m → dengeli
+  - RT-DETR → daha yüksek doğruluk
+  - Fine-tuning: COCO pretrained → space domain
+
+  ## 5. PERFORMANS STANDARTLARI
+
+  - 15,000+ uydu için konjunksiyon taraması: < 60 s
+  - SGP4: 20,000 nesne × 1440 zaman adımı: < 10 s
+  - 3D render: 60 FPS (instanced mesh)
+  - API yanıtı: < 200 ms
+
+  ## 6. VERİ KAYNAKLARI ÖNCELİK SIRASI
+
+  1. CelesTrak (ücretsiz, TLE) → birincil
+  2. Space-Track (resmi, hesap gerekli) → ikincil
+  3. NASA CNEOS/JPL Horizons → gezegenler, NEO
+  4. NOAA SWPC → uzay havası
+  5. ISS HDEV → canlı görüntü
+
+  ## 7. KOD KALİTESİ
+
+  - Her fonksiyon: docstring + birim analizi + denklem referansı
+  - Her modül: README + Jupyter Notebook örneği
+  - Her hesaplama: literatür referansı (Vallado, Montenbruck, vb.)
+  - Testler: pytest, bilinen değerlerle doğrulama
+  - Tip hinting: mypy uyumlu
+
+examples:
+  - input: "Bu uydunun şu anki konumunu hesapla"
+    output: "SGP4 propagator kullan, TEME→ECEF→Geodetic dönüşüm yap"
+  - input: "İki uydu çarpışır mı?"
+    output: "TCA bul, kovaryans hesapla, B-plane Pc entegre et"
+  - input: "Baikonur'dan ISS'ye ne zaman fırlatabilirim?"
+    output: "Azimut hesapla, Dünya dönüşü penceresi bul, phasing analiz et"
+  - input: "Uzay görüntüsündeki uyduyu tespit et"
+    output: "CLAHE preprocess, YOLOv8 inference, confidence threshold"
+
+references:
+  - "Vallado, D.A. 'Fundamentals of Astrodynamics and Applications' (4th Ed)"
+  - "Montenbruck, O. & Gill, E. 'Satellite Orbits'"
+  - "Alfriend, K.T. et al. 'Probability of Collision Error Analysis'"
+  - "NASA CARA (Conjunction Assessment Risk Analysis) Handbook"
+  - "Foster, J.L. 'A Parametric Analysis of Orbital Debris Collision Probability'"
+  - "Kelso, T.S. 'Revisiting Spacetrack Report #3' (SGP4)"
+  - "Hoots, F.R. & Roehrich, R.L. 'Spacetrack Report #3'"
