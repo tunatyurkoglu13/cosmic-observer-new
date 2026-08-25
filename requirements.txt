@@ -24,3 +24,8 @@ geopandas==0.14.1
 pydantic==2.5.0
 python-dotenv==1.0.0
 pytest==7.4.3
+opencv-python-headless
+torch
+torchvision
+ultralytics
+scikit-learn

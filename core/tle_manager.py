@@ -27,8 +27,15 @@ CELESTRAK_BASE = "https://celestrak.org/NORAD/elements/gp.php"
 # GROUP names CelesTrak recognizes; see https://celestrak.org/NORAD/elements/
 GROUPS = {
     "active": "active",
-    "debris": "debris",
+    # CelesTrak retired the generic GROUP=debris query; debris is now only
+    # available as named fragmentation-event clouds. cosmos-2251-debris
+    # (the 2009 Iridium-33/Cosmos-2251 collision) is the largest tracked
+    # cloud and stands in as our default "debris" sample.
+    "debris": "cosmos-2251-debris",
     "stations": "stations",
+    "visual": "visual",
+    "starlink": "starlink",
+    "gps-ops": "gps-ops",
 }
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cache" / "tle_cache.sqlite3"
@@ -119,6 +126,23 @@ class TLEManager:
                 )
                 """
             )
+            # A satellite can legitimately belong to more than one
+            # CelesTrak group at once (e.g. the ISS is both "stations"
+            # and "visual" — one of the brightest visible objects).
+            # `satellites.classification` only ever records the group it
+            # was *first* seen under (see _upsert), so group membership
+            # for load_cached()'s filtering is tracked separately here,
+            # rather than being clobbered by whichever group happens to
+            # be fetched most recently.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS satellite_groups (
+                    norad_id INTEGER NOT NULL,
+                    group_name TEXT NOT NULL,
+                    PRIMARY KEY (norad_id, group_name)
+                )
+                """
+            )
 
     def _group_is_stale(self, group_name: str) -> bool:
         with sqlite3.connect(self.db_path) as conn:
@@ -147,6 +171,8 @@ class TLEManager:
         url = f"{CELESTRAK_BASE}?GROUP={GROUPS[group]}&FORMAT=tle"
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
+        if resp.text.lstrip().startswith("Invalid query") or resp.text.lstrip().startswith("No GP data found"):
+            raise RuntimeError(f"CelesTrak rejected group '{group}' (GROUP={GROUPS[group]}): {resp.text.strip()}")
 
         satellites = self._parse_tle_text(resp.text, classification=group)
         self._upsert(satellites)
@@ -190,8 +216,13 @@ class TLEManager:
                     epoch=excluded.epoch, inclination_deg=excluded.inclination_deg,
                     eccentricity=excluded.eccentricity, mean_motion=excluded.mean_motion,
                     semi_major_axis_km=excluded.semi_major_axis_km,
-                    classification=excluded.classification, fetched_at=excluded.fetched_at
+                    fetched_at=excluded.fetched_at
                 """,
+                # Note: classification is intentionally NOT in the UPDATE SET
+                # above, so a satellite's first-seen group "wins" and later
+                # fetches under a different group (e.g. ISS also appearing
+                # in "visual") don't overwrite it. Full multi-group
+                # membership is tracked in satellite_groups below instead.
                 [
                     (
                         s.norad_id, s.name, s.line1, s.line2, s.epoch.isoformat(),
@@ -201,14 +232,37 @@ class TLEManager:
                     for s in satellites
                 ],
             )
+            conn.executemany(
+                "INSERT OR IGNORE INTO satellite_groups (norad_id, group_name) VALUES (?, ?)",
+                [(s.norad_id, s.classification) for s in satellites],
+            )
 
     def load_cached(self, classification: str | None = None) -> list[Satellite]:
-        """Load satellites from the local cache without touching the network."""
-        query = "SELECT norad_id, name, line1, line2, epoch, inclination_deg, eccentricity, mean_motion, semi_major_axis_km, classification FROM satellites"
-        params: tuple = ()
-        if classification is not None:
-            query += " WHERE classification = ?"
-            params = (classification,)
+        """
+        Load satellites from the local cache without touching the network.
+
+        Filtering by `classification` matches on *group membership*
+        (satellite_groups), not the satellites table's own classification
+        column — a satellite can belong to multiple CelesTrak groups
+        (e.g. the ISS is both "stations" and "visual"), and this ensures
+        it's returned for every group it's actually in rather than only
+        whichever group happened to be recorded first.
+        """
+        if classification is None:
+            query = (
+                "SELECT norad_id, name, line1, line2, epoch, inclination_deg, "
+                "eccentricity, mean_motion, semi_major_axis_km, classification FROM satellites"
+            )
+            params: tuple = ()
+        else:
+            query = (
+                "SELECT s.norad_id, s.name, s.line1, s.line2, s.epoch, s.inclination_deg, "
+                "s.eccentricity, s.mean_motion, s.semi_major_axis_km, ? "
+                "FROM satellites s "
+                "JOIN satellite_groups sg ON sg.norad_id = s.norad_id "
+                "WHERE sg.group_name = ?"
+            )
+            params = (classification, classification)
 
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(query, params).fetchall()

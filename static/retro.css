@@ -1,0 +1,60 @@
+:root {
+  --co-background: #0a0a14;
+  --co-cyan: #00ffff;
+  --co-magenta: #ff0066;
+  --co-amber: #ffcc00;
+  --co-phosphor-green: #00ff66;
+  --co-alert-emergency: #ff0033;
+  --co-alert-high: #ff0066;
+  --co-alert-medium: #ffcc00;
+  --co-alert-info: #00ffff;
+  --co-font: 'JetBrains Mono', 'IBM Plex Mono', 'Fira Code', ui-monospace, monospace;
+}
+
+.co-scanlines {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.06) 3px
+  );
+  mix-blend-mode: overlay;
+}
+
+@keyframes co-crt-flicker {
+  0%   { opacity: 0.0; }
+  3%   { opacity: 0.02; }
+  6%   { opacity: 0.0; }
+  47%  { opacity: 0.0; }
+  50%  { opacity: 0.03; }
+  53%  { opacity: 0.0; }
+  100% { opacity: 0.0; }
+}
+.co-crt-flicker {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  background: #00ffff;
+  animation: co-crt-flicker 6.0s infinite;
+}
+
+.co-panel {
+  background: rgba(10, 10, 20, 0.72);
+  border: 1px solid #00ffff;
+  box-shadow: 0 0 8px #00ffff66, inset 0 0 12px #00ffff22;
+  color: #00ffff;
+  font-family: 'JetBrains Mono', 'IBM Plex Mono', 'Fira Code', ui-monospace, monospace;
+  padding: 12px 16px;
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+  backdrop-filter: blur(2px);
+}
+.co-panel h1, .co-panel h2, .co-panel h3 {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 8px 0;
+}

@@ -9,3 +9,6 @@ data/cache/
 *.egg-info/
 .pytest_cache/
 .DS_Store
+*.pt
+runs/
+models/

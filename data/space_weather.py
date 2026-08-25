@@ -111,7 +111,10 @@ def fetch_latest_kp(use_1min: bool = True) -> float:
         raise RuntimeError(f"Empty Kp response from {url}")
 
     latest = records[-1]
-    return float(latest.get("estimated_kp") or latest.get("Kp"))
+    value = latest.get("estimated_kp")
+    if value is None:
+        value = latest.get("Kp")
+    return float(value)
 
 
 def fetch_latest_f107() -> float:

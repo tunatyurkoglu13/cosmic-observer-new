@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>COSMIC OBSERVER</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="retro.css">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--co-background);
+    color: var(--co-cyan);
+    font-family: var(--co-font);
+    overflow: hidden;
+  }
+  #scene-container { position: fixed; inset: 0; }
+
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    display: grid;
+    grid-template-columns: 320px 1fr 280px;
+    grid-template-rows: auto 1fr auto;
+    gap: 16px;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  #hud > * { pointer-events: auto; }
+
+  .co-panel { font-size: 12px; line-height: 1.5; }
+  .co-panel .value { color: var(--co-phosphor-green); }
+  .co-panel .dim { opacity: 0.6; }
+
+  #title-panel { grid-column: 1 / 2; grid-row: 1 / 2; }
+  #title-panel h1 { font-size: 18px; letter-spacing: 0.15em; }
+  #title-panel .subtitle { font-size: 11px; opacity: 0.7; letter-spacing: 0.1em; }
+
+  #legend-panel { grid-column: 3 / 4; grid-row: 1 / 2; }
+  .legend-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+
+  #info-panel { grid-column: 1 / 2; grid-row: 2 / 3; align-self: start; max-height: 60vh; overflow-y: auto; }
+  #info-panel table { border-collapse: collapse; width: 100%; }
+  #info-panel td { padding: 2px 6px 2px 0; vertical-align: top; }
+  #info-panel td:first-child { color: var(--co-amber); white-space: nowrap; }
+
+  #stats-panel { grid-column: 3 / 4; grid-row: 2 / 3; align-self: start; }
+
+  #time-panel { grid-column: 1 / 4; grid-row: 3 / 4; }
+  #time-panel .row { display: flex; align-items: center; gap: 12px; }
+  #time-slider { flex: 1; accent-color: var(--co-cyan); }
+  #time-readout { min-width: 220px; text-align: right; color: var(--co-phosphor-green); }
+
+  .co-btn {
+    background: rgba(0,255,255,0.08);
+    border: 1px solid var(--co-cyan);
+    color: var(--co-cyan);
+    font-family: var(--co-font);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .co-btn:hover { background: rgba(0,255,255,0.2); }
+  .co-btn.active { background: var(--co-cyan); color: #000; }
+
+  #loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--co-background); color: var(--co-cyan); font-size: 14px;
+    letter-spacing: 0.2em; z-index: 10000;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">LOADING TELEMETRY&hellip;</div>
+<div class="co-scanlines"></div>
+<div class="co-crt-flicker"></div>
+
+<div id="scene-container"></div>
+
+<div id="hud">
+  <div id="title-panel" class="co-panel">
+    <h1>COSMIC OBSERVER</h1>
+    <div class="subtitle">SPACE DOMAIN AWARENESS // TRACKING GRID ONLINE</div>
+  </div>
+
+  <div id="legend-panel" class="co-panel">
+    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-amber); color: var(--co-amber);"></span> STATION / CREWED</div>
+    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-cyan); color: var(--co-cyan);"></span> ACTIVE SATELLITE</div>
+    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-magenta); color: var(--co-magenta);"></span> DEBRIS</div>
+    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-phosphor-green); color: var(--co-phosphor-green);"></span> ISS (ZARYA)</div>
+  </div>
+
+  <div id="info-panel" class="co-panel">
+    <div class="dim">SELECT AN OBJECT&hellip;</div>
+  </div>
+
+  <div id="stats-panel" class="co-panel">
+    <table>
+      <tr><td>TRACKED</td><td class="value" id="stat-count">--</td></tr>
+      <tr><td>FRAME</td><td class="value" id="stat-frame">--</td></tr>
+      <tr><td>EPOCH (UTC)</td><td class="value" id="stat-epoch">--</td></tr>
+      <tr><td>SUBSOLAR</td><td class="value" id="stat-subsolar">--</td></tr>
+    </table>
+  </div>
+
+  <div id="time-panel" class="co-panel">
+    <div class="row">
+      <button class="co-btn" id="play-btn">&#9654; PLAY</button>
+      <input type="range" id="time-slider" min="0" max="23" step="1" value="0" />
+      <span id="time-readout">--</span>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="dashboard.js"></script>
+</body>
+</html>
