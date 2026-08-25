@@ -125,7 +125,7 @@ def launch_azimuth(target_inclination_deg: float, site_lat_deg: float, direction
     else:
         raise ValueError("direction must be 'northeast' or 'southeast'")
 
-    return az % 360.0
+    return float(az % 360.0)
 
 
 def _datetime_to_jd(dt: datetime) -> float:
