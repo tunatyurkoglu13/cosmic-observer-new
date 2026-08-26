@@ -19,15 +19,32 @@ through here rather than recomputed:
   - Torino Scale (ts): the simplified 0-10 scale derived from combining
     impact probability and kinetic energy, intended for public
     communication (Palermo is the finer-grained research scale).
+
+Caching: the risk list is cached to a small local JSON file and served
+through core.resilient_fetch.ResilientFetcher's network -> cache ->
+cooldown chain (the same pattern core.tle_manager.TLEManager uses for
+CelesTrak) — this client previously had no resilience at all (a bare
+requests.get() with no fallback), so a transient JPL outage would
+surface directly as an error to callers instead of degrading to
+recently-cached data. There's no bundled "seed" fallback for this one
+(unlike TLE data, there's no small last-known-good risk list checked
+into the repo) — on a cold cache with no network, this simply raises.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
 
+from core.resilient_fetch import ResilientFetcher
+
 SENTRY_API_URL = "https://ssd-api.jpl.nasa.gov/sentry.api"
+
+DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "cache" / "cneos_risk_list.json"
 
 TORINO_DESCRIPTIONS = {
     0: "No Hazard",
@@ -42,6 +59,11 @@ TORINO_DESCRIPTIONS = {
     9: "Certain Collision — Regional",
     10: "Certain Collision — Global",
 }
+
+# The one key this client's resilient cache is keyed on — there's only
+# ever one Sentry risk list, but ResilientFetcher's hooks are keyed, so
+# we give it a fixed name rather than special-casing a keyless variant.
+RISK_LIST_KEY = "risk_list"
 
 
 @dataclass
@@ -102,20 +124,53 @@ class SentryObject:
         )
 
 
-class CNEOSClient:
-    """Thin client over the JPL Sentry API."""
+class CNEOSClient(ResilientFetcher[list[SentryObject]]):
+    """Thin, cache-resilient client over the JPL Sentry API."""
 
-    def __init__(self, timeout: int = 30):
+    def __init__(
+        self,
+        timeout: int = 30,
+        cache_path: Path | str = DEFAULT_CACHE_PATH,
+        staleness: timedelta = timedelta(hours=6),
+        failure_retry_cooldown: timedelta = timedelta(minutes=2),
+    ):
         self.timeout = timeout
+        self.cache_path = Path(cache_path)
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.staleness = staleness
+        self.failure_retry_cooldown = failure_retry_cooldown
 
-    def fetch_risk_list(self) -> list[SentryObject]:
+    def fetch_risk_list(self, force: bool = False, allow_stale_fallback: bool = True) -> list[SentryObject]:
         """
-        Fetch the full current Sentry risk list (all monitored objects).
+        Fetch the full current Sentry risk list (all monitored objects),
+        served through the network -> cache -> cooldown resilience chain.
 
         Returns:
             list[SentryObject], sorted by descending Torino scale then
             descending cumulative Palermo scale (most concerning first).
         """
+        return self.fetch(RISK_LIST_KEY, force=force, allow_fallback=allow_stale_fallback)
+
+    def fetch_object(self, designation: str) -> dict:
+        """
+        Fetch full Sentry detail for a single object by designation (e.g.
+        "99942" for Apophis), including its individual virtual-impactor
+        table. Returned as the raw JSON dict since the per-impactor schema
+        is nested and use-case-specific (unlike the flat risk-list schema
+        modeled by SentryObject). Not cached: this is a targeted lookup,
+        not the bulk resource the resilience chain is built around.
+        """
+        resp = requests.get(SENTRY_API_URL, params={"des": designation}, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def objects_above_torino(self, threshold: int = 1) -> list[SentryObject]:
+        """Convenience filter: risk-list objects at or above a given Torino Scale value."""
+        return [o for o in self.fetch_risk_list() if o.torino_scale_max >= threshold]
+
+    # --- ResilientFetcher hooks -------------------------------------------------
+
+    def _fetch_live(self, key: str) -> list[SentryObject]:
         resp = requests.get(SENTRY_API_URL, timeout=self.timeout)
         resp.raise_for_status()
         payload = resp.json()
@@ -125,18 +180,56 @@ class CNEOSClient:
         objects.sort(key=lambda o: (o.torino_scale_max, o.palermo_scale_cum), reverse=True)
         return objects
 
-    def fetch_object(self, designation: str) -> dict:
-        """
-        Fetch full Sentry detail for a single object by designation (e.g.
-        "99942" for Apophis), including its individual virtual-impactor
-        table. Returned as the raw JSON dict since the per-impactor schema
-        is nested and use-case-specific (unlike the flat risk-list schema
-        modeled by SentryObject).
-        """
-        resp = requests.get(SENTRY_API_URL, params={"des": designation}, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+    def _read_cache_file(self) -> dict | None:
+        if not self.cache_path.exists():
+            return None
+        try:
+            return json.loads(self.cache_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
 
-    def objects_above_torino(self, threshold: int = 1) -> list[SentryObject]:
-        """Convenience filter: risk-list objects at or above a given Torino Scale value."""
-        return [o for o in self.fetch_risk_list() if o.torino_scale_max >= threshold]
+    def _load_cache(self, key: str) -> list[SentryObject]:
+        payload = self._read_cache_file()
+        if not payload:
+            return []
+        return [SentryObject(**rec) for rec in payload.get("objects", [])]
+
+    def _save_cache(self, key: str, data: list[SentryObject]) -> None:
+        self.cache_path.write_text(json.dumps({
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "objects": [asdict(o) for o in data],
+        }))
+
+    def _store_fallback(self, key: str, data: list[SentryObject]) -> None:
+        # No bundled seed exists for this client (see module docstring),
+        # so this is never actually exercised, but is implemented for
+        # interface completeness/consistency with TLEManager.
+        self._save_cache(key, data)
+
+    def _load_seed(self, key: str) -> list[SentryObject]:
+        return []  # no bundled last-known-good risk list is checked into the repo
+
+    def _is_stale(self, key: str) -> bool:
+        payload = self._read_cache_file()
+        if not payload or "fetched_at" not in payload:
+            return True
+        fetched_at = datetime.fromisoformat(payload["fetched_at"])
+        return datetime.now(timezone.utc) - fetched_at > self.staleness
+
+    def _recently_failed(self, key: str) -> bool:
+        payload = self._read_cache_file()
+        if not payload or "failed_at" not in payload:
+            return False
+        failed_at = datetime.fromisoformat(payload["failed_at"])
+        return datetime.now(timezone.utc) - failed_at <= self.failure_retry_cooldown
+
+    def _record_failure(self, key: str) -> None:
+        payload = self._read_cache_file() or {"objects": []}
+        payload["failed_at"] = datetime.now(timezone.utc).isoformat()
+        self.cache_path.write_text(json.dumps(payload))
+
+    def _clear_failure(self, key: str) -> None:
+        payload = self._read_cache_file()
+        if payload and "failed_at" in payload:
+            del payload["failed_at"]
+            self.cache_path.write_text(json.dumps(payload))

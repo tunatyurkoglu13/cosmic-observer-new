@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -38,6 +38,8 @@ from cv.open_vocabulary import DEFAULT_SPACE_QUERIES, OpenVocabularyDetector
 from cv.streak_detection import draw_streaks, detect_streaks
 from cv.streamer import FrameProcessor, build_sample_video, encode_jpeg
 from data.nasa_cneos import CNEOSClient
+from data.neows import NeoWsClient
+from data.sbdb import SBDBClient
 from data.space_weather import fetch_current_snapshot
 from reports.launch_analysis import generate_launch_analysis
 from reports.risk_report import generate_risk_report
@@ -347,6 +349,38 @@ def neo_risk_list(min_torino: int = 0):
         objects = client.objects_above_torino(min_torino) if min_torino > 0 else client.fetch_risk_list()
     except requests.RequestException:
         raise HTTPException(503, "NASA JPL Sentry API is currently unreachable — external service outage, try again shortly.")
+    return {"count": len(objects), "objects": objects}
+
+
+@app.get("/api/asteroid/{designation}")
+def asteroid_lookup(designation: str):
+    """Orbital elements + hazard classification for one asteroid/comet by designation or name (JPL SBDB)."""
+    client = SBDBClient()
+    try:
+        body = client.lookup(designation)
+    except requests.RequestException:
+        raise HTTPException(503, "JPL Small-Body Database is currently unreachable — external service outage, try again shortly.")
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return body
+
+
+@app.get("/api/neo/close-approach")
+def neo_close_approach(start_date: str | None = None, end_date: str | None = None):
+    """
+    Near-Earth objects with a catalogued close approach in the given date
+    range (NASA NeoWs; at most 7 days per call). Defaults to today.
+    """
+    start = date.fromisoformat(start_date) if start_date else date.today()
+    end = date.fromisoformat(end_date) if end_date else start
+
+    client = NeoWsClient()
+    try:
+        objects = client.feed(start, end)
+    except requests.RequestException:
+        raise HTTPException(503, "NASA NeoWs API is currently unreachable — external service outage, try again shortly.")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"count": len(objects), "objects": objects}
 
 

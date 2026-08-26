@@ -21,6 +21,8 @@ import requests
 
 from core.constants import MU_EARTH
 from core.kepler import semi_major_axis_from_mean_motion
+from core.resilient_fetch import ResilientFetcher
+from core.space_track_client import SpaceTrackClient
 
 CELESTRAK_BASE = "https://celestrak.org/NORAD/elements/gp.php"
 
@@ -91,7 +93,7 @@ class Satellite:
         )
 
 
-class TLEManager:
+class TLEManager(ResilientFetcher[list[Satellite]]):
     """Fetches TLE groups from CelesTrak, parses them, and caches to SQLite."""
 
     def __init__(
@@ -99,7 +101,15 @@ class TLEManager:
         db_path: Path | str = DEFAULT_DB_PATH,
         staleness: timedelta = timedelta(hours=6),
         failure_retry_cooldown: timedelta = timedelta(minutes=2),
+        space_track_client: SpaceTrackClient | None = None,
     ):
+        # Optional, additive: when given a configured SpaceTrackClient (see
+        # core.space_track_client), _fetch_live tries it first for groups
+        # it has a name-pattern mapping for, silently falling through to
+        # the existing CelesTrak path on any failure — including simply
+        # not being configured (no credentials in .env). Passing nothing
+        # (the default) reproduces the exact pre-Space-Track behavior.
+        self.space_track_client = space_track_client
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.staleness = staleness
@@ -231,54 +241,62 @@ class TLEManager:
         if group not in GROUPS:
             raise ValueError(f"Unknown TLE group '{group}'. Known groups: {list(GROUPS)}")
 
-        if not force and not self._group_is_stale(group):
-            return self.load_cached(classification=group)
+        return self.fetch(group, force=force, allow_fallback=allow_stale_fallback)
 
-        if not force and self._recently_failed(group):
-            # We just tried and failed within the cooldown window — don't
-            # eat another connect-timeout for nothing; go straight to
-            # whatever fallback we already used last time.
-            cached = self.load_cached(classification=group)
-            if cached:
-                return cached
+    # --- ResilientFetcher hooks -------------------------------------------------
 
-        try:
-            url = f"{CELESTRAK_BASE}?GROUP={GROUPS[group]}&FORMAT=tle"
-            # 8s, not the more generous 30s CelesTrak itself normally
-            # responds well within: this app now has a cache -> seed
-            # fallback chain, so a slow/unreachable host should fail over
-            # quickly rather than making every request wait half a minute
-            # before degrading (CelesTrak going fully unreachable has
-            # happened repeatedly during this project's own development).
-            resp = requests.get(url, timeout=8)
-            resp.raise_for_status()
-        except requests.RequestException:
-            self._record_failure(group)
-            if allow_stale_fallback:
-                cached = self.load_cached(classification=group)
-                if cached:
-                    return cached
-                seeded = self._load_seed(group)
-                if seeded:
-                    self._upsert(seeded)
-                    return seeded
-            raise
+    def _fetch_live(self, key: str) -> list[Satellite]:
+        group = key
+
+        if self.space_track_client is not None and self.space_track_client.is_configured:
+            try:
+                text = self.space_track_client.fetch_group_tle(group)
+                satellites = self._parse_tle_text(text, classification=group)
+                if satellites:
+                    return satellites
+            except (ValueError, requests.RequestException, RuntimeError):
+                # No mapping for this group, or Space-Track itself failed
+                # (auth, network, rate limit) — fall through to CelesTrak
+                # exactly as if no Space-Track client had been configured.
+                pass
+
+        url = f"{CELESTRAK_BASE}?GROUP={GROUPS[group]}&FORMAT=tle"
+        # 8s, not the more generous 30s CelesTrak itself normally
+        # responds well within: this app now has a cache -> seed
+        # fallback chain, so a slow/unreachable host should fail over
+        # quickly rather than making every request wait half a minute
+        # before degrading (CelesTrak going fully unreachable has
+        # happened repeatedly during this project's own development).
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
 
         if resp.text.lstrip().startswith("Invalid query") or resp.text.lstrip().startswith("No GP data found"):
             raise RuntimeError(f"CelesTrak rejected group '{group}' (GROUP={GROUPS[group]}): {resp.text.strip()}")
 
-        self._clear_failure(group)
-        satellites = self._parse_tle_text(resp.text, classification=group)
-        self._upsert(satellites)
+        return self._parse_tle_text(resp.text, classification=group)
 
+    def _load_cache(self, key: str) -> list[Satellite]:
+        return self.load_cached(classification=key)
+
+    def _save_cache(self, key: str, data: list[Satellite]) -> None:
+        self._upsert(data)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "INSERT INTO fetch_log (group_name, fetched_at) VALUES (?, ?) "
                 "ON CONFLICT(group_name) DO UPDATE SET fetched_at = excluded.fetched_at",
-                (group, datetime.now(timezone.utc).isoformat()),
+                (key, datetime.now(timezone.utc).isoformat()),
             )
 
-        return satellites
+    def _store_fallback(self, key: str, data: list[Satellite]) -> None:
+        # Seed data is upserted into the cache (so it's what a subsequent
+        # in-cooldown call finds) but deliberately does NOT touch
+        # fetch_log — the group must still read as stale so a later,
+        # out-of-cooldown call retries the real network instead of
+        # treating bundled seed data as if it were freshly fetched.
+        self._upsert(data)
+
+    def _is_stale(self, key: str) -> bool:
+        return self._group_is_stale(key)
 
     def _load_seed(self, group: str) -> list[Satellite]:
         """Load the bundled last-known-good seed file for a group, if one exists (see data/seed_tle/README.md)."""
