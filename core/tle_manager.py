@@ -94,10 +94,22 @@ class Satellite:
 class TLEManager:
     """Fetches TLE groups from CelesTrak, parses them, and caches to SQLite."""
 
-    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH, staleness: timedelta = timedelta(hours=6)):
+    def __init__(
+        self,
+        db_path: Path | str = DEFAULT_DB_PATH,
+        staleness: timedelta = timedelta(hours=6),
+        failure_retry_cooldown: timedelta = timedelta(minutes=2),
+    ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.staleness = staleness
+        # How long to skip re-attempting a group's network fetch after it
+        # just failed, before trying again. Short on purpose: long enough
+        # that a sustained CelesTrak outage doesn't force every single
+        # fetch_group() call to eat an 8s connect-timeout, short enough
+        # that a real recovery is noticed quickly rather than waiting out
+        # the full `staleness` window.
+        self.failure_retry_cooldown = failure_retry_cooldown
         self._init_db()
 
     def _init_db(self) -> None:
@@ -144,6 +156,14 @@ class TLEManager:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fetch_failures (
+                    group_name TEXT PRIMARY KEY,
+                    failed_at TEXT NOT NULL
+                )
+                """
+            )
 
     def _group_is_stale(self, group_name: str) -> bool:
         with sqlite3.connect(self.db_path) as conn:
@@ -154,6 +174,29 @@ class TLEManager:
             return True
         fetched_at = datetime.fromisoformat(row[0])
         return datetime.now(timezone.utc) - fetched_at > self.staleness
+
+    def _recently_failed(self, group_name: str) -> bool:
+        """True if this group's network fetch failed within failure_retry_cooldown — skip retrying network for a bit."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT failed_at FROM fetch_failures WHERE group_name = ?", (group_name,)
+            ).fetchone()
+        if row is None:
+            return False
+        failed_at = datetime.fromisoformat(row[0])
+        return datetime.now(timezone.utc) - failed_at <= self.failure_retry_cooldown
+
+    def _record_failure(self, group_name: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO fetch_failures (group_name, failed_at) VALUES (?, ?) "
+                "ON CONFLICT(group_name) DO UPDATE SET failed_at = excluded.failed_at",
+                (group_name, datetime.now(timezone.utc).isoformat()),
+            )
+
+    def _clear_failure(self, group_name: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM fetch_failures WHERE group_name = ?", (group_name,))
 
     def fetch_group(self, group: str, force: bool = False, allow_stale_fallback: bool = True) -> list[Satellite]:
         """
@@ -191,6 +234,14 @@ class TLEManager:
         if not force and not self._group_is_stale(group):
             return self.load_cached(classification=group)
 
+        if not force and self._recently_failed(group):
+            # We just tried and failed within the cooldown window — don't
+            # eat another connect-timeout for nothing; go straight to
+            # whatever fallback we already used last time.
+            cached = self.load_cached(classification=group)
+            if cached:
+                return cached
+
         try:
             url = f"{CELESTRAK_BASE}?GROUP={GROUPS[group]}&FORMAT=tle"
             # 8s, not the more generous 30s CelesTrak itself normally
@@ -202,6 +253,7 @@ class TLEManager:
             resp = requests.get(url, timeout=8)
             resp.raise_for_status()
         except requests.RequestException:
+            self._record_failure(group)
             if allow_stale_fallback:
                 cached = self.load_cached(classification=group)
                 if cached:
@@ -215,6 +267,7 @@ class TLEManager:
         if resp.text.lstrip().startswith("Invalid query") or resp.text.lstrip().startswith("No GP data found"):
             raise RuntimeError(f"CelesTrak rejected group '{group}' (GROUP={GROUPS[group]}): {resp.text.strip()}")
 
+        self._clear_failure(group)
         satellites = self._parse_tle_text(resp.text, classification=group)
         self._upsert(satellites)
 

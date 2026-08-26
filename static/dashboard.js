@@ -194,6 +194,14 @@ class Dashboard {
     const nightMap = textureLoader.load(TEXTURE_BASE + 'earth_lights_2048.png');
     dayMap.colorSpace = THREE.SRGBColorSpace;
     nightMap.colorSpace = THREE.SRGBColorSpace;
+    // THREE.TextureLoader defaults flipY=true (auto-flips the image
+    // vertically on upload, since WebGL's texture-space origin is
+    // bottom-left while image files are stored top-down). Our fragment
+    // shader computes UV directly from real lat/lon with row 0 = north
+    // pole (verified pixel-by-pixel against the raw file), so that
+    // automatic flip must be disabled or the map renders upside-down.
+    dayMap.flipY = false;
+    nightMap.flipY = false;
 
     const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 64, 64);
     this.earthMaterial = new THREE.ShaderMaterial({

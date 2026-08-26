@@ -123,13 +123,45 @@ def test_fetch_group_falls_back_to_bundled_seed_when_no_cache_and_network_fails(
     assert len(result) == 1
     assert result[0].name == "ISS (ZARYA)"
 
-    # And it should now also be cached, so a subsequent call within the
-    # staleness window doesn't need the seed file (or network) again.
+    # A subsequent call within the failure-retry cooldown must not eat
+    # another network attempt (which could take a long time to time out
+    # again) — it should go straight to the now-cached seed data. We
+    # still patch requests.get here (raising if called) to make that
+    # guarantee explicit rather than relying on timing.
     with patch("core.tle_manager.SEED_TLE_DIR", tmp_path / "gone"):
-        cached_result = mgr.fetch_group("stations")
+        with patch("core.tle_manager.requests.get", side_effect=AssertionError("should not hit network again")):
+            cached_result = mgr.fetch_group("stations")
     assert len(cached_result) == 1
+    assert cached_result[0].name == "ISS (ZARYA)"
 
 
+
+
+def test_fetch_group_skips_network_during_failure_cooldown_even_with_no_cache(tmp_path):
+    """
+    During a sustained outage, repeated fetch_group() calls must not each
+    eat a fresh connect-timeout — after one failure, subsequent calls
+    within failure_retry_cooldown should return the seed fallback
+    directly without attempting the network again.
+    """
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir()
+    (seed_dir / "stations.tle").write_text(f"ISS (ZARYA)\n{LINE1}\n{LINE2}\n")
+
+    mgr = TLEManager(db_path=tmp_path / "test_cache.sqlite3", failure_retry_cooldown=timedelta(minutes=5))
+
+    call_count = {"n": 0}
+
+    def flaky_get(*args, **kwargs):
+        call_count["n"] += 1
+        raise requests.ConnectTimeout("simulated outage")
+
+    with patch("core.tle_manager.SEED_TLE_DIR", seed_dir):
+        with patch("core.tle_manager.requests.get", side_effect=flaky_get):
+            mgr.fetch_group("stations")  # first call: fails, falls back to seed, records failure
+            mgr.fetch_group("stations")  # second call: should skip network entirely (cooldown active)
+
+    assert call_count["n"] == 1
 
 
 def test_fetch_group_allow_stale_fallback_false_raises_even_with_cache(tmp_path):
