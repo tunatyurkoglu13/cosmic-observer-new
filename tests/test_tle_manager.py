@@ -1,4 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+import pytest
+import requests
 
 from core.tle_manager import Satellite, TLEManager
 
@@ -64,3 +68,80 @@ def test_satellite_from_tle_parses_norad_id_and_epoch():
     assert sat.norad_id == 5
     assert sat.inclination_deg == 34.2682
     assert sat.semi_major_axis_km > 0
+
+
+def test_fetch_group_falls_back_to_stale_cache_on_network_failure(tmp_path):
+    """
+    Regression test for the real-world failure mode this project hit
+    repeatedly: CelesTrak becomes temporarily unreachable. If we already
+    have *any* cached data for the group, fetch_group should degrade to
+    serving that stale data rather than raising — a slightly outdated
+    catalog is far more useful to an interactive tool than a hard failure.
+    """
+    mgr = TLEManager(db_path=tmp_path / "test_cache.sqlite3", staleness=timedelta(hours=6))
+    mgr._upsert([_make_sat(25544, "stations")])
+    # Mark the group as having been fetched a long time ago, so
+    # fetch_group() will actually attempt a fresh network call rather
+    # than short-circuiting to the cache via the staleness check.
+    import sqlite3
+    with sqlite3.connect(mgr.db_path) as conn:
+        conn.execute(
+            "INSERT INTO fetch_log (group_name, fetched_at) VALUES (?, ?)",
+            ("stations", (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()),
+        )
+
+    with patch("core.tle_manager.requests.get", side_effect=requests.ConnectTimeout("simulated outage")):
+        result = mgr.fetch_group("stations")
+
+    assert len(result) == 1
+    assert result[0].norad_id == 25544
+
+
+def test_fetch_group_raises_when_no_cache_and_network_fails(tmp_path):
+    mgr = TLEManager(db_path=tmp_path / "test_cache.sqlite3")
+    with patch("core.tle_manager.SEED_TLE_DIR", tmp_path / "no_seed_here"):
+        with patch("core.tle_manager.requests.get", side_effect=requests.ConnectTimeout("simulated outage")):
+            with pytest.raises(requests.ConnectTimeout):
+                mgr.fetch_group("stations")
+
+
+def test_fetch_group_falls_back_to_bundled_seed_when_no_cache_and_network_fails(tmp_path):
+    """
+    The deepest fallback: brand-new cache (e.g. a fresh clone of the repo)
+    AND the network is down. fetch_group() must still return the bundled
+    seed data rather than raising, so the app works out of the box.
+    """
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir()
+    (seed_dir / "stations.tle").write_text(f"ISS (ZARYA)\n{LINE1}\n{LINE2}\n")
+
+    mgr = TLEManager(db_path=tmp_path / "test_cache.sqlite3")
+    with patch("core.tle_manager.SEED_TLE_DIR", seed_dir):
+        with patch("core.tle_manager.requests.get", side_effect=requests.ConnectTimeout("simulated outage")):
+            result = mgr.fetch_group("stations")
+
+    assert len(result) == 1
+    assert result[0].name == "ISS (ZARYA)"
+
+    # And it should now also be cached, so a subsequent call within the
+    # staleness window doesn't need the seed file (or network) again.
+    with patch("core.tle_manager.SEED_TLE_DIR", tmp_path / "gone"):
+        cached_result = mgr.fetch_group("stations")
+    assert len(cached_result) == 1
+
+
+
+
+def test_fetch_group_allow_stale_fallback_false_raises_even_with_cache(tmp_path):
+    mgr = TLEManager(db_path=tmp_path / "test_cache.sqlite3", staleness=timedelta(hours=6))
+    mgr._upsert([_make_sat(25544, "stations")])
+    import sqlite3
+    with sqlite3.connect(mgr.db_path) as conn:
+        conn.execute(
+            "INSERT INTO fetch_log (group_name, fetched_at) VALUES (?, ?)",
+            ("stations", (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()),
+        )
+
+    with patch("core.tle_manager.requests.get", side_effect=requests.ConnectTimeout("simulated outage")):
+        with pytest.raises(requests.ConnectTimeout):
+            mgr.fetch_group("stations", allow_stale_fallback=False)

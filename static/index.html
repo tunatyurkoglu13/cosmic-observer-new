@@ -19,7 +19,7 @@
   #hud {
     position: fixed; inset: 0; pointer-events: none;
     display: grid;
-    grid-template-columns: 320px 1fr 280px;
+    grid-template-columns: 320px 1fr 300px;
     grid-template-rows: auto 1fr auto;
     gap: 16px;
     padding: 16px;
@@ -27,24 +27,48 @@
   }
   #hud > * { pointer-events: auto; }
 
+  #left-sidebar { grid-column: 1 / 2; grid-row: 1 / 3; display: flex; flex-direction: column; gap: 16px; overflow: hidden; }
+  #right-sidebar { grid-column: 3 / 4; grid-row: 1 / 3; display: flex; flex-direction: column; gap: 16px; }
+
   .co-panel { font-size: 12px; line-height: 1.5; }
   .co-panel .value { color: var(--co-phosphor-green); }
   .co-panel .dim { opacity: 0.6; }
 
-  #title-panel { grid-column: 1 / 2; grid-row: 1 / 2; }
   #title-panel h1 { font-size: 18px; letter-spacing: 0.15em; }
   #title-panel .subtitle { font-size: 11px; opacity: 0.7; letter-spacing: 0.1em; }
 
-  #legend-panel { grid-column: 3 / 4; grid-row: 1 / 2; }
   .legend-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 6px currentColor; flex-shrink: 0; }
+  .legend-swatch.diamond { border-radius: 0; transform: rotate(45deg); }
+  .legend-swatch.line { border-radius: 0; width: 18px; height: 2px; box-shadow: 0 0 4px currentColor; }
+  .legend-subhead { opacity: 0.55; font-size: 10px; letter-spacing: 0.1em; margin: 10px 0 4px 0; }
+  .legend-subhead:first-child { margin-top: 0; }
 
-  #info-panel { grid-column: 1 / 2; grid-row: 2 / 3; align-self: start; max-height: 60vh; overflow-y: auto; }
+  #info-panel { flex-shrink: 0; }
   #info-panel table { border-collapse: collapse; width: 100%; }
   #info-panel td { padding: 2px 6px 2px 0; vertical-align: top; }
   #info-panel td:first-child { color: var(--co-amber); white-space: nowrap; }
 
-  #stats-panel { grid-column: 3 / 4; grid-row: 2 / 3; align-self: start; }
+  #mission-planner-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  #mission-planner-panel h3 { font-size: 12px; letter-spacing: 0.1em; margin: 0 0 8px 0; color: var(--co-amber); }
+  .mp-row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; gap: 8px; }
+  .mp-row label { opacity: 0.7; font-size: 10px; white-space: nowrap; }
+  .mp-row input, .mp-row select {
+    background: rgba(0,255,255,0.05); border: 1px solid var(--co-cyan); color: var(--co-cyan);
+    font-family: var(--co-font); font-size: 11px; padding: 2px 4px; width: 130px;
+  }
+  #mp-compute-btn { width: 100%; margin-top: 8px; }
+  #mp-status { margin-top: 6px; font-size: 10px; min-height: 14px; }
+  #mp-results { margin-top: 8px; overflow-y: auto; flex: 1; min-height: 0; }
+  .mp-candidate {
+    border: 1px solid rgba(0,255,255,0.2); border-left-width: 3px; margin: 3px 0;
+    padding: 4px 6px; cursor: pointer; font-size: 10px; line-height: 1.4;
+  }
+  .mp-candidate:hover { background: rgba(0,255,255,0.08); }
+  .mp-candidate.clear { border-left-color: var(--co-phosphor-green); }
+  .mp-candidate.blocked { border-left-color: var(--co-alert-emergency); }
+  .mp-candidate.selected { background: rgba(0,255,255,0.18); }
+  .mp-violation { color: var(--co-magenta); font-size: 9px; margin-top: 2px; }
 
   #time-panel { grid-column: 1 / 4; grid-row: 3 / 4; }
   #time-panel .row { display: flex; align-items: center; gap: 12px; }
@@ -81,29 +105,56 @@
 <div id="scene-container"></div>
 
 <div id="hud">
-  <div id="title-panel" class="co-panel">
-    <h1>COSMIC OBSERVER</h1>
-    <div class="subtitle">SPACE DOMAIN AWARENESS // TRACKING GRID ONLINE</div>
+  <div id="left-sidebar">
+    <div id="title-panel" class="co-panel">
+      <h1>COSMIC OBSERVER</h1>
+      <div class="subtitle">SPACE DOMAIN AWARENESS // TRACKING GRID ONLINE</div>
+    </div>
+
+    <div id="info-panel" class="co-panel">
+      <div class="dim">SELECT AN OBJECT&hellip;</div>
+    </div>
+
+    <div id="mission-planner-panel" class="co-panel">
+      <h3>MISSION PLANNER — COLA</h3>
+      <div class="mp-row"><label>LAUNCH SITE</label><select id="mp-site"></select></div>
+      <div class="mp-row"><label>INCLINATION (deg)</label><input type="number" id="mp-incl" value="51.6" step="0.1"></div>
+      <div class="mp-row"><label>ALTITUDE (km)</label><input type="number" id="mp-alt" value="400" step="10"></div>
+      <div class="mp-row"><label>SEARCH WINDOW (h)</label><input type="number" id="mp-hours" value="6" step="1" min="1" max="48"></div>
+      <div class="mp-row"><label>SAFETY BUBBLE (km)</label><input type="number" id="mp-bubble" value="50" step="10"></div>
+      <button class="co-btn" id="mp-compute-btn">COMPUTE LAUNCH WINDOWS</button>
+      <div id="mp-status" class="dim"></div>
+      <div id="mp-results"></div>
+    </div>
   </div>
 
-  <div id="legend-panel" class="co-panel">
-    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-amber); color: var(--co-amber);"></span> STATION / CREWED</div>
-    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-cyan); color: var(--co-cyan);"></span> ACTIVE SATELLITE</div>
-    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-magenta); color: var(--co-magenta);"></span> DEBRIS</div>
-    <div class="legend-row"><span class="legend-swatch" style="background: var(--co-phosphor-green); color: var(--co-phosphor-green);"></span> ISS (ZARYA)</div>
-  </div>
+  <div id="right-sidebar">
+    <div id="legend-panel" class="co-panel">
+      <div class="legend-subhead">OBJECTS (DOTS)</div>
+      <div class="legend-row"><span class="legend-swatch" style="background: var(--co-amber); color: var(--co-amber);"></span> STATION / CREWED</div>
+      <div class="legend-row"><span class="legend-swatch" style="background: var(--co-cyan); color: var(--co-cyan);"></span> ACTIVE SATELLITE</div>
+      <div class="legend-row"><span class="legend-swatch" style="background: var(--co-magenta); color: var(--co-magenta);"></span> DEBRIS</div>
+      <div class="legend-row"><span class="legend-swatch" style="background: var(--co-phosphor-green); color: var(--co-phosphor-green);"></span> ISS (ZARYA)</div>
+      <div class="legend-row"><span class="legend-swatch diamond" style="background: #ffffff; color: #ffffff;"></span> LAUNCH SITE</div>
 
-  <div id="info-panel" class="co-panel">
-    <div class="dim">SELECT AN OBJECT&hellip;</div>
-  </div>
+      <div class="legend-subhead">LINES</div>
+      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-amber); color: var(--co-amber);"></span> STATION ORBIT PATH (1 rev)</div>
+      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-cyan); color: var(--co-cyan);"></span> DAY/NIGHT TERMINATOR</div>
 
-  <div id="stats-panel" class="co-panel">
-    <table>
-      <tr><td>TRACKED</td><td class="value" id="stat-count">--</td></tr>
-      <tr><td>FRAME</td><td class="value" id="stat-frame">--</td></tr>
-      <tr><td>EPOCH (UTC)</td><td class="value" id="stat-epoch">--</td></tr>
-      <tr><td>SUBSOLAR</td><td class="value" id="stat-subsolar">--</td></tr>
-    </table>
+      <div class="legend-subhead">COLA ROCKET PATH</div>
+      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-phosphor-green); color: var(--co-phosphor-green);"></span> CLEAR (safe margin)</div>
+      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-amber); color: var(--co-amber);"></span> CAUTION (&lt;3&times; bubble)</div>
+      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-alert-emergency); color: var(--co-alert-emergency);"></span> VIOLATION (inside bubble)</div>
+    </div>
+
+    <div id="stats-panel" class="co-panel">
+      <table>
+        <tr><td>TRACKED</td><td class="value" id="stat-count">--</td></tr>
+        <tr><td>FRAME</td><td class="value" id="stat-frame">--</td></tr>
+        <tr><td>EPOCH (UTC)</td><td class="value" id="stat-epoch">--</td></tr>
+        <tr><td>SUBSOLAR</td><td class="value" id="stat-subsolar">--</td></tr>
+      </table>
+    </div>
   </div>
 
   <div id="time-panel" class="co-panel">

@@ -87,6 +87,41 @@ class Propagator:
         """Convenience wrapper: propagate to a sequence of datetimes."""
         return [self.propagate(dt) for dt in datetimes]
 
+    def propagate_teme_array(self, jd_array: np.ndarray, fr_array: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Vectorized propagation of this ONE satellite across MANY epochs in
+        a single call, via the sgp4 library's `Satrec.sgp4_array()` (a
+        numpy-vectorized loop implemented in C, not a Python for-loop) —
+        orders of magnitude faster than calling propagate() once per
+        epoch when you need a fine time grid for many objects (e.g.
+        COLA corridor screening in stm/cola.py, which needs every catalog
+        object's position at every sample of a fine ascent-duration grid).
+
+        Args:
+            jd_array, fr_array: parallel arrays of Julian date (integer
+                part) and fraction-of-day, matching sgp4's jday() split —
+                build them with core.propagator.jd_fr_array_from_datetimes().
+
+        Returns:
+            (error_array, r_teme_array, v_teme_array): error_array is 0
+            where propagation succeeded (nonzero = SGP4 error at that
+            epoch, e.g. decayed orbit); r_teme_array/v_teme_array have
+            shape (N, 3) in km / km-s, with unreliable values at any row
+            where error_array != 0 (mask them out before using).
+        """
+        error_array, r_teme_array, v_teme_array = self._sat.sgp4_array(jd_array, fr_array)
+        return error_array, r_teme_array, v_teme_array
+
+
+def jd_fr_array_from_datetimes(datetimes) -> tuple[np.ndarray, np.ndarray]:
+    """Build the (jd_array, fr_array) pair propagate_teme_array() expects, from a sequence of UTC datetimes."""
+    jd_list, fr_list = [], []
+    for dt in datetimes:
+        jd, fr = jday(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second + dt.microsecond * 1e-6)
+        jd_list.append(jd)
+        fr_list.append(fr)
+    return np.array(jd_list), np.array(fr_list)
+
 
 def gmst_from_jd(jd: float) -> float:
     """
@@ -159,6 +194,59 @@ def ecef_to_geodetic(r_ecef: np.ndarray) -> tuple[float, float, float]:
     alt = p / np.cos(lat) - N
 
     return np.degrees(lat), np.degrees(lon), alt
+
+
+def geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_km: float) -> np.ndarray:
+    """
+    Convert geodetic (lat, lon, alt) on the WGS-72 ellipsoid to ECEF —
+    the forward direction of ecef_to_geodetic(), used to place a
+    ground-referenced point (e.g. a launch site, or a rocket ascent
+    trajectory's lat/lon/alt ground track) into Cartesian coordinates.
+
+        N(lat) = a / sqrt(1 - e^2 sin^2(lat))         [prime vertical radius of curvature]
+        x = (N + alt) cos(lat) cos(lon)
+        y = (N + alt) cos(lat) sin(lon)
+        z = (N (1-e^2) + alt) sin(lat)
+
+    Returns:
+        r_ecef, a 3-vector [km].
+    """
+    lat, lon = np.radians(lat_deg), np.radians(lon_deg)
+    f = EARTH_FLATTENING
+    a = R_EARTH
+    e2 = 2 * f - f**2
+
+    sin_lat, cos_lat = np.sin(lat), np.cos(lat)
+    N = a / np.sqrt(1 - e2 * sin_lat**2)
+
+    x = (N + alt_km) * cos_lat * np.cos(lon)
+    y = (N + alt_km) * cos_lat * np.sin(lon)
+    z = (N * (1 - e2) + alt_km) * sin_lat
+
+    return np.array([x, y, z])
+
+
+def ecef_to_teme(r_ecef: np.ndarray, gmst_rad: float) -> np.ndarray:
+    """
+    Inverse of teme_to_ecef(): rotate an ECEF position into TEME by the
+    *positive* GMST angle (ECEF lags TEME by GMST as Earth rotates
+    underneath the inertial frame, so undoing that rotation requires the
+    opposite sign from teme_to_ecef's R(-GMST)).
+
+    Used to place a ground-referenced trajectory (rocket ascent path,
+    given naturally as lat/lon/alt vs. time) into the same inertial TEME
+    frame SGP4-propagated satellite positions live in, so the two can be
+    compared directly (e.g. for COLA corridor distance screening in
+    stm/cola.py) without one silently drifting relative to the other as
+    Earth rotates.
+    """
+    c, s = np.cos(gmst_rad), np.sin(gmst_rad)
+    R = np.array([
+        [c, -s, 0.0],
+        [s, c, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    return R @ r_ecef
 
 
 def j2_secular_rates(a: float, e: float, i: float, mu: float, r_earth: float, j2: float) -> tuple[float, float]:

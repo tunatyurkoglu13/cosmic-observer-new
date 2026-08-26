@@ -34,6 +34,20 @@ function latLonAltToVector3(latDeg, lonDeg, altKm, out) {
   return out ? out.set(x, y, z) : new THREE.Vector3(x, y, z);
 }
 
+async function extractErrorDetail(resp) {
+  // FastAPI's HTTPException(status, "message") responses come back as
+  // {"detail": "message"} — surface that directly instead of a bare
+  // status code, since our backend now puts a genuinely useful
+  // explanation there (e.g. "CelesTrak is unreachable" vs. a real bug).
+  try {
+    const body = await resp.json();
+    if (body && body.detail) return body.detail;
+  } catch (_) {
+    // response wasn't JSON — fall through to the generic message
+  }
+  return `HTTP ${resp.status}`;
+}
+
 function makeCircleSprite(colorHex) {
   const size = 64;
   const canvas = document.createElement('canvas');
@@ -53,31 +67,51 @@ function makeCircleSprite(colorHex) {
 const EARTH_VERTEX_SHADER = `
 varying vec3 vNormal;
 void main() {
-  vNormal = normalize(normalMatrix * normal);
+  // Deliberately OBJECT-space (not normalMatrix * normal, which is
+  // view-space and rotates with the camera). The Earth mesh itself
+  // never rotates or moves — only the camera orbits around it via
+  // OrbitControls — so object space IS world space here, and it must
+  // match the fixed Earth frame every satellite/launch-site/ground-track
+  // position is placed in (see latLonAltToVector3). Using the view-space
+  // normal made the lat/lon computed in the fragment shader silently
+  // drift as the camera moved, desyncing the map from real positions.
+  vNormal = normalize(normal);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
 const EARTH_FRAGMENT_SHADER = `
 uniform vec3 uSunDir;
-uniform vec3 uDayColor;
-uniform vec3 uNightColor;
+uniform sampler2D uDayMap;
+uniform sampler2D uNightMap;
 uniform vec3 uGridColor;
 varying vec3 vNormal;
+
+#define PI 3.14159265
 
 void main() {
   vec3 n = normalize(vNormal);
   float ndotl = dot(n, normalize(uSunDir));
-  vec3 base = mix(uNightColor, uDayColor, smoothstep(-0.15, 0.15, ndotl));
 
+  // Same lat/lon this app computes everywhere else (core.propagator /
+  // dashboard.js latLonAltToVector3), re-derived from the surface
+  // normal so the day/night texture lookup lines up exactly with where
+  // satellites, launch sites, and ground tracks are plotted.
   float lat = asin(clamp(n.y, -1.0, 1.0));
   float lon = atan(n.z, n.x);
+  vec2 uv = vec2(lon / (2.0 * PI) + 0.5, 0.5 - lat / PI);
 
-  float latGrid = abs(fract(lat / 3.14159265 * 18.0 + 0.5) - 0.5) * 2.0;
-  float lonGrid = abs(fract(lon / 3.14159265 * 12.0 + 0.5) - 0.5) * 2.0;
-  float gridLine = 1.0 - smoothstep(0.0, 0.03, min(latGrid, lonGrid));
+  vec3 dayColor = texture2D(uDayMap, uv).rgb;
+  vec3 nightColor = texture2D(uNightMap, uv).rgb;
+  vec3 base = mix(nightColor, dayColor, smoothstep(-0.15, 0.15, ndotl));
 
-  vec3 color = mix(base, uGridColor, gridLine * 0.35);
+  // Faint reference grid every 30 deg, kept subtle so the real map reads
+  // clearly underneath — a HUD overlay, not the primary visual anymore.
+  float latGrid = abs(fract(lat / PI * 6.0 + 0.5) - 0.5) * 2.0;
+  float lonGrid = abs(fract(lon / PI * 6.0 + 0.5) - 0.5) * 2.0;
+  float gridLine = 1.0 - smoothstep(0.0, 0.02, min(latGrid, lonGrid));
+
+  vec3 color = mix(base, uGridColor, gridLine * 0.15);
   gl_FragColor = vec4(color, 1.0);
 }
 `;
@@ -112,6 +146,8 @@ class Dashboard {
     this._buildTerminator();
     this._initHud();
     this._initPicking();
+    this._buildLaunchSites();
+    this._initMissionPlanner();
 
     this._updateFrame(0);
     this._animate();
@@ -133,6 +169,11 @@ class Dashboard {
     this.controls.enableDamping = true;
     this.controls.minDistance = 6;
     this.controls.maxDistance = 40;
+    // Slow idle spin so the globe reads as a living 3D world (continents
+    // visibly turning) rather than a static image; OrbitControls pauses
+    // this automatically while the user is dragging and resumes after.
+    this.controls.autoRotate = true;
+    this.controls.autoRotateSpeed = 0.35;
 
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -142,12 +183,24 @@ class Dashboard {
   }
 
   _buildEarth() {
+    // Real day/night Earth imagery (NASA-derived textures shipped with
+    // three.js's own examples) so continents are actually recognizable —
+    // sampled in the shader using this app's own lat/lon convention (see
+    // EARTH_FRAGMENT_SHADER), so the map lines up exactly with where
+    // satellites, launch sites, and ground tracks get plotted.
+    const textureLoader = new THREE.TextureLoader();
+    const TEXTURE_BASE = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/';
+    const dayMap = textureLoader.load(TEXTURE_BASE + 'earth_atmos_2048.jpg');
+    const nightMap = textureLoader.load(TEXTURE_BASE + 'earth_lights_2048.png');
+    dayMap.colorSpace = THREE.SRGBColorSpace;
+    nightMap.colorSpace = THREE.SRGBColorSpace;
+
     const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 64, 64);
     this.earthMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uSunDir: { value: new THREE.Vector3(1, 0, 0) },
-        uDayColor: { value: new THREE.Color(0x0d5c73) },
-        uNightColor: { value: new THREE.Color(0x000000) },
+        uDayMap: { value: dayMap },
+        uNightMap: { value: nightMap },
         uGridColor: { value: new THREE.Color(PALETTE.cyan) },
       },
       vertexShader: EARTH_VERTEX_SHADER,
@@ -357,6 +410,185 @@ class Dashboard {
     }
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  // -------------------------------------------------------------------
+  // Mission Planner — COLA (Collision On Launch Assessment)
+  // -------------------------------------------------------------------
+
+  _buildLaunchSites() {
+    this.launchSiteMarkers = {};
+    fetch('/api/launch-sites')
+      .then((r) => r.json())
+      .then((sites) => {
+        this.launchSites = sites;
+        const select = document.getElementById('mp-site');
+        select.innerHTML = '';
+        for (const [key, site] of Object.entries(sites)) {
+          const opt = document.createElement('option');
+          opt.value = key;
+          opt.textContent = site.name;
+          select.appendChild(opt);
+
+          const geometry = new THREE.SphereGeometry(0.045, 8, 8);
+          const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+          const marker = new THREE.Mesh(geometry, material);
+          const pos = latLonAltToVector3(site.lat_deg, site.lon_deg, 5);
+          marker.position.copy(pos);
+          this.scene.add(marker);
+          this.launchSiteMarkers[key] = marker;
+        }
+      })
+      .catch((err) => console.error('Failed to load launch sites:', err));
+  }
+
+  _initMissionPlanner() {
+    this.trajectoryLine = null;
+    this.selectedCandidateEl = null;
+
+    document.getElementById('mp-compute-btn').addEventListener('click', () => this._runColaScan());
+  }
+
+  async _runColaScan() {
+    const statusEl = document.getElementById('mp-status');
+    const resultsEl = document.getElementById('mp-results');
+    const site = document.getElementById('mp-site').value;
+    const inclination = parseFloat(document.getElementById('mp-incl').value);
+    const altitude = parseFloat(document.getElementById('mp-alt').value);
+    const hours = parseFloat(document.getElementById('mp-hours').value);
+    const bubble = parseFloat(document.getElementById('mp-bubble').value);
+
+    if (!site) return;
+
+    statusEl.textContent = 'SCANNING CATALOG…';
+    resultsEl.innerHTML = '';
+    this._clearTrajectory();
+
+    const now = new Date();
+    const end = new Date(now.getTime() + hours * 3600 * 1000);
+
+    let data;
+    try {
+      const resp = await fetch('/api/cola/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          site,
+          target_inclination_deg: inclination,
+          target_altitude_km: altitude,
+          search_start: now.toISOString(),
+          search_end: end.toISOString(),
+          candidate_step_minutes: Math.max(1, Math.round(hours * 60 / 60)), // ~60 candidates across the window
+          bubble_radius_km: bubble,
+          catalog_groups: ['stations', 'visual'],
+          catalog_limit_per_group: 150,
+        }),
+      });
+      if (!resp.ok) throw new Error(await extractErrorDetail(resp));
+      data = await resp.json();
+    } catch (err) {
+      statusEl.textContent = `HATA: ${err.message || err}`;
+      return;
+    }
+
+    const clearCount = data.candidates.filter((c) => c.clear).length;
+    statusEl.textContent = `${data.objects_screened} OBJECTS SCREENED — ${clearCount}/${data.candidates.length} WINDOWS CLEAR`;
+
+    this._lastColaRequest = { site, inclination, altitude, bubble };
+
+    for (const candidate of data.candidates) {
+      const row = document.createElement('div');
+      row.className = `mp-candidate ${candidate.clear ? 'clear' : 'blocked'}`;
+      const t = new Date(candidate.launch_time);
+      const timeStr = t.toISOString().slice(11, 19) + ' UTC';
+      const statusStr = candidate.clear ? 'CLEAR' : `BLOCKED (${candidate.violations.length})`;
+
+      let html = `<div><b>${timeStr}</b> — az ${candidate.azimuth_deg.toFixed(1)}° — ${statusStr}</div>`;
+      html += `<div class="dim">closest approach: ${candidate.closest_approach_km.toFixed(1)} km</div>`;
+      if (!candidate.clear) {
+        const v = candidate.violations[0];
+        html += `<div class="mp-violation">⚠ ${v.satellite_name} @ ${v.distance_km.toFixed(1)} km (T+${v.t_offset_s.toFixed(0)}s)</div>`;
+      }
+      row.innerHTML = html;
+
+      row.addEventListener('click', () => {
+        if (this.selectedCandidateEl) this.selectedCandidateEl.classList.remove('selected');
+        row.classList.add('selected');
+        this.selectedCandidateEl = row;
+        this._drawTrajectory(candidate.launch_time);
+      });
+
+      resultsEl.appendChild(row);
+    }
+
+    if (data.candidates.length > 0) {
+      resultsEl.firstChild.click();
+    }
+  }
+
+  _clearTrajectory() {
+    if (this.trajectoryLine) {
+      this.scene.remove(this.trajectoryLine);
+      this.trajectoryLine.geometry.dispose();
+      this.trajectoryLine.material.dispose();
+      this.trajectoryLine = null;
+    }
+  }
+
+  async _drawTrajectory(launchTimeIso) {
+    const req = this._lastColaRequest;
+    if (!req) return;
+
+    let data;
+    try {
+      const resp = await fetch('/api/cola/trajectory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          site: req.site,
+          target_inclination_deg: req.inclination,
+          target_altitude_km: req.altitude,
+          launch_time: launchTimeIso,
+          bubble_radius_km: req.bubble,
+          catalog_groups: ['stations', 'visual'],
+          catalog_limit_per_group: 150,
+        }),
+      });
+      if (!resp.ok) throw new Error(await extractErrorDetail(resp));
+      data = await resp.json();
+    } catch (err) {
+      document.getElementById('mp-status').textContent = `HATA: ${err.message || err}`;
+      return;
+    }
+
+    this._clearTrajectory();
+
+    const positions = [];
+    const colors = [];
+    const bubbleRadius = data.bubble_radius_km;
+
+    for (const sample of data.trajectory) {
+      const p = latLonAltToVector3(sample.lat_deg, sample.lon_deg, sample.alt_km);
+      positions.push(p.x, p.y, p.z);
+
+      let color;
+      if (sample.closest_distance_km < bubbleRadius) {
+        color = new THREE.Color(0xff0033); // violation: red
+      } else if (sample.closest_distance_km < bubbleRadius * 3) {
+        color = new THREE.Color(0xffcc00); // caution: amber
+      } else {
+        color = new THREE.Color(0x00ff66); // clear: phosphor green
+      }
+      colors.push(color.r, color.g, color.b);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+    const material = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
+    this.trajectoryLine = new THREE.Line(geometry, material);
+    this.scene.add(this.trajectoryLine);
   }
 }
 

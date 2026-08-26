@@ -39,6 +39,7 @@ GROUPS = {
 }
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cache" / "tle_cache.sqlite3"
+SEED_TLE_DIR = Path(__file__).resolve().parent.parent / "data" / "seed_tle"
 
 
 @dataclass
@@ -154,13 +155,35 @@ class TLEManager:
         fetched_at = datetime.fromisoformat(row[0])
         return datetime.now(timezone.utc) - fetched_at > self.staleness
 
-    def fetch_group(self, group: str, force: bool = False) -> list[Satellite]:
+    def fetch_group(self, group: str, force: bool = False, allow_stale_fallback: bool = True) -> list[Satellite]:
         """
         Fetch one CelesTrak group ("active", "debris", "stations"), parse
         every TLE in the response, and upsert into the cache.
 
         If the cache for this group was refreshed within `self.staleness`
         and force=False, skip the network call and return cached rows.
+
+        Args:
+            allow_stale_fallback: if the network request fails (CelesTrak
+                unreachable/timeout/rate-limited — this happens in
+                practice, not just hypothetically) fall back, in order:
+                (1) any previously cached data for this group, however
+                stale; (2) a bundled seed TLE file (data/seed_tle/), a
+                small last-known-good set checked into the repo so the
+                app still shows real satellites even on a fresh install
+                with no network at all. A slightly outdated satellite
+                catalog is far more useful to an interactive tool than a
+                hard failure; propagation error from stale TLEs grows
+                slowly (see Satellite.epoch / recent_only()), so serving
+                old data for a while is a reasonable degradation, not
+                silent wrongness. Set to False if a caller specifically
+                needs to know the fetch failed rather than get quietly
+                degraded data.
+
+        Raises:
+            requests.RequestException: on network failure with no cached
+                or seed fallback available (or allow_stale_fallback=False).
+            ValueError: for an unknown group name.
         """
         if group not in GROUPS:
             raise ValueError(f"Unknown TLE group '{group}'. Known groups: {list(GROUPS)}")
@@ -168,9 +191,27 @@ class TLEManager:
         if not force and not self._group_is_stale(group):
             return self.load_cached(classification=group)
 
-        url = f"{CELESTRAK_BASE}?GROUP={GROUPS[group]}&FORMAT=tle"
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
+        try:
+            url = f"{CELESTRAK_BASE}?GROUP={GROUPS[group]}&FORMAT=tle"
+            # 8s, not the more generous 30s CelesTrak itself normally
+            # responds well within: this app now has a cache -> seed
+            # fallback chain, so a slow/unreachable host should fail over
+            # quickly rather than making every request wait half a minute
+            # before degrading (CelesTrak going fully unreachable has
+            # happened repeatedly during this project's own development).
+            resp = requests.get(url, timeout=8)
+            resp.raise_for_status()
+        except requests.RequestException:
+            if allow_stale_fallback:
+                cached = self.load_cached(classification=group)
+                if cached:
+                    return cached
+                seeded = self._load_seed(group)
+                if seeded:
+                    self._upsert(seeded)
+                    return seeded
+            raise
+
         if resp.text.lstrip().startswith("Invalid query") or resp.text.lstrip().startswith("No GP data found"):
             raise RuntimeError(f"CelesTrak rejected group '{group}' (GROUP={GROUPS[group]}): {resp.text.strip()}")
 
@@ -185,6 +226,13 @@ class TLEManager:
             )
 
         return satellites
+
+    def _load_seed(self, group: str) -> list[Satellite]:
+        """Load the bundled last-known-good seed file for a group, if one exists (see data/seed_tle/README.md)."""
+        seed_path = SEED_TLE_DIR / f"{group}.tle"
+        if not seed_path.exists():
+            return []
+        return self._parse_tle_text(seed_path.read_text(), classification=group)
 
     @staticmethod
     def _parse_tle_text(text: str, classification: str) -> list[Satellite]:

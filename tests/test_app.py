@@ -1,4 +1,7 @@
+from unittest.mock import patch
+
 import pytest
+import requests
 from fastapi.testclient import TestClient
 
 import app as app_module
@@ -30,6 +33,81 @@ def test_list_satellites_stations_group():
     assert any(s["name"].startswith("ISS") for s in data["satellites"])
 
 
+def test_cola_scan_returns_clean_503_when_celestrak_unreachable():
+    """
+    Regression test for the exact bug the user hit: CelesTrak being
+    unreachable used to bubble up as an opaque, unhandled 500. It must
+    now come back as a 503 with an explanatory `detail` message the
+    frontend can display directly.
+    """
+    with patch("app.tle_manager.fetch_group", side_effect=requests.ConnectTimeout("simulated outage")):
+        resp = client.post("/api/cola/scan", json={
+            "site": "cape_canaveral",
+            "target_inclination_deg": 51.6,
+            "search_start": "2026-01-01T00:00:00Z",
+            "search_end": "2026-01-01T00:10:00Z",
+        })
+    assert resp.status_code == 503
+    assert "unreachable" in resp.json()["detail"].lower()
+
+
+def test_cola_scan_degrades_gracefully_when_one_group_fails_but_another_succeeds():
+    """
+    Regression test: a COLA scan requesting ['stations', 'visual'] should
+    still return real results using whatever groups succeeded, rather
+    than failing the whole request just because one group (e.g. 'visual',
+    which has no bundled seed) is unavailable during an outage.
+    """
+    from datetime import datetime, timezone
+
+    from core.tle_manager import Satellite
+
+    fake_sat = Satellite(
+        norad_id=25544, name="ISS (ZARYA)", line1=(
+            "1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9008"
+        ), line2=(
+            "2 25544  51.6416 339.9500 0001177  93.3861 264.7930 15.49560752 42982"
+        ), epoch=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        inclination_deg=51.6416, eccentricity=0.0001177, mean_motion_rev_per_day=15.4956,
+        semi_major_axis_km=6796.0, classification="stations",
+    )
+
+    def flaky_fetch(group, *args, **kwargs):
+        if group == "visual":
+            raise requests.ConnectTimeout("simulated outage for visual only")
+        return [fake_sat]
+
+    with patch("app.tle_manager.fetch_group", side_effect=flaky_fetch):
+        resp = client.post("/api/cola/scan", json={
+            "site": "cape_canaveral",
+            "target_inclination_deg": 51.6,
+            "search_start": "2026-01-01T00:00:00Z",
+            "search_end": "2026-01-01T00:10:00Z",
+            "catalog_groups": ["stations", "visual"],
+        })
+    assert resp.status_code == 200
+    assert resp.json()["objects_screened"] == 1
+
+
+def test_cola_scan_fails_only_when_every_group_fails():
+    with patch("app.tle_manager.fetch_group", side_effect=requests.ConnectTimeout("simulated total outage")):
+        resp = client.post("/api/cola/scan", json={
+            "site": "cape_canaveral",
+            "target_inclination_deg": 51.6,
+            "search_start": "2026-01-01T00:00:00Z",
+            "search_end": "2026-01-01T00:10:00Z",
+            "catalog_groups": ["stations", "visual"],
+        })
+    assert resp.status_code == 503
+
+
+def test_list_satellites_returns_clean_503_when_celestrak_unreachable():
+    with patch("app.tle_manager.fetch_group", side_effect=requests.ConnectTimeout("simulated outage")):
+        resp = client.get("/api/satellites", params={"group": "stations"})
+    assert resp.status_code == 503
+    assert "detail" in resp.json()
+
+
 def test_list_satellites_rejects_unknown_group():
     resp = client.get("/api/satellites", params={"group": "not-a-real-group"})
     assert resp.status_code == 400
@@ -46,6 +124,7 @@ def test_satellite_position_returns_valid_geodetic():
     assert 300.0 < data["alt_km"] < 500.0
 
 
+@pytest.mark.network
 def test_satellite_position_404_for_unknown_norad_id():
     resp = client.get("/api/satellites/99999999/position", params={"group": "stations"})
     assert resp.status_code == 404
@@ -95,6 +174,55 @@ def test_launch_windows_rejects_unknown_site():
         "end": "2026-01-02T00:00:00Z",
     })
     assert resp.status_code == 400
+
+
+@pytest.mark.network
+def test_cola_scan_endpoint_returns_candidates():
+    resp = client.post("/api/cola/scan", json={
+        "site": "cape_canaveral",
+        "target_inclination_deg": 51.6,
+        "target_altitude_km": 400.0,
+        "search_start": "2026-01-01T00:00:00Z",
+        "search_end": "2026-01-01T00:20:00Z",
+        "candidate_step_minutes": 5,
+        "bubble_radius_km": 50.0,
+        "catalog_groups": ["stations"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["objects_screened"] > 0
+    assert len(data["candidates"]) == 5  # 0,5,10,15,20 min
+    for c in data["candidates"]:
+        assert isinstance(c["clear"], bool)
+        assert c["azimuth_deg"] > 0
+
+
+def test_cola_scan_rejects_unknown_site():
+    resp = client.post("/api/cola/scan", json={
+        "site": "not-a-real-site",
+        "target_inclination_deg": 51.6,
+        "search_start": "2026-01-01T00:00:00Z",
+        "search_end": "2026-01-01T00:10:00Z",
+    })
+    assert resp.status_code == 400
+
+
+@pytest.mark.network
+def test_cola_trajectory_endpoint_returns_full_path():
+    resp = client.post("/api/cola/trajectory", json={
+        "site": "cape_canaveral",
+        "target_inclination_deg": 51.6,
+        "target_altitude_km": 400.0,
+        "launch_time": "2026-01-01T00:00:00Z",
+        "bubble_radius_km": 50.0,
+        "catalog_groups": ["stations"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["trajectory"]) > 0
+    first, last = data["trajectory"][0], data["trajectory"][-1]
+    assert first["alt_km"] < last["alt_km"]
+    assert "closest_distance_km" in first
 
 
 def test_launch_sites_endpoint():

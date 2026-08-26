@@ -3,7 +3,15 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 from sgp4.api import Satrec, jday
 
-from core.propagator import Propagator, ecef_to_geodetic, gmst_from_jd, teme_to_ecef
+from core.propagator import (
+    Propagator,
+    ecef_to_geodetic,
+    ecef_to_teme,
+    geodetic_to_ecef,
+    gmst_from_jd,
+    jd_fr_array_from_datetimes,
+    teme_to_ecef,
+)
 
 # Classic Spacetrack-Report-3 / Vallado SGP4 test TLE (satellite 00005,
 # "Vanguard 1"): a well-known eccentric orbit (e ~ 0.163, perigee ~650 km,
@@ -72,3 +80,41 @@ def test_teme_to_ecef_then_geodetic_roundtrip():
     assert -90.0 <= lat <= 90.0
     assert -180.0 <= lon <= 180.0
     assert alt > 0
+
+
+def test_geodetic_to_ecef_then_back_roundtrip():
+    lat, lon, alt = 28.5621, -80.5773, 0.0  # Cape Canaveral, sea level
+    r_ecef = geodetic_to_ecef(lat, lon, alt)
+    lat2, lon2, alt2 = ecef_to_geodetic(r_ecef)
+    assert np.isclose(lat, lat2, atol=1e-6)
+    assert np.isclose(lon, lon2, atol=1e-6)
+    assert np.isclose(alt, alt2, atol=1e-3)
+
+
+def test_geodetic_to_ecef_matches_known_radius_at_equator():
+    # At the equator and sea level, ECEF radius should equal R_EARTH exactly.
+    r_ecef = geodetic_to_ecef(0.0, 0.0, 0.0)
+    assert np.isclose(np.linalg.norm(r_ecef), 6378.137, atol=1e-6)
+
+
+def test_ecef_to_teme_is_inverse_of_teme_to_ecef():
+    r_teme = np.array([7022.580127, -1400.087066, 0.036577])
+    gmst = gmst_from_jd(2451545.0)
+    r_ecef = teme_to_ecef(r_teme, gmst)
+    r_teme_recovered = ecef_to_teme(r_ecef, gmst)
+    assert np.allclose(r_teme, r_teme_recovered, atol=1e-9)
+
+
+def test_propagate_teme_array_matches_scalar_propagate():
+    prop = Propagator(LINE1, LINE2, name="test-sat")
+    epoch = _tle_epoch()
+    datetimes = [epoch + timedelta(minutes=i) for i in range(5)]
+
+    jd_array, fr_array = jd_fr_array_from_datetimes(datetimes)
+    error_array, r_array, v_array = prop.propagate_teme_array(jd_array, fr_array)
+
+    assert np.all(error_array == 0)
+    for i, dt in enumerate(datetimes):
+        state = prop.propagate(dt)
+        assert np.allclose(r_array[i], state.r_teme, atol=1e-6)
+        assert np.allclose(v_array[i], state.v_teme, atol=1e-6)
