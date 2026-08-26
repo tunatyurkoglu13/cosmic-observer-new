@@ -14,3 +14,4 @@ runs/
 models/
 data/cv_uploads/
 static/cv_sample.mp4
+data/cv_training/

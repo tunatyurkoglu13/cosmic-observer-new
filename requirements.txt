@@ -31,3 +31,4 @@ torchvision
 ultralytics
 scikit-learn
 yt-dlp
+transformers

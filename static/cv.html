@@ -122,12 +122,27 @@
       <div id="cv-status" class="dim"></div>
     </div>
 
+    <div id="identify-panel" class="co-panel">
+      <h3 style="font-size:12px;letter-spacing:0.1em;margin:0 0 8px 0;color:var(--co-amber);">IDENTIFY IMAGE (ZERO-SHOT)</h3>
+      <div class="co-row">
+        <label>IMAGE</label>
+        <input type="file" id="identify-file" accept="image/*,.fits,.fit,.fts" />
+      </div>
+      <div class="co-row">
+        <label>QUERIES</label>
+        <input type="text" id="identify-queries" placeholder="satellite, solar panel (optional)" style="flex:1;background:rgba(0,255,255,0.05);border:1px solid var(--co-cyan);color:var(--co-cyan);font-family:var(--co-font);font-size:10px;padding:3px 4px;" />
+      </div>
+      <button class="co-btn" id="identify-btn">&#128269; IDENTIFY IMAGE</button>
+      <div id="identify-status" class="dim"></div>
+    </div>
+
     <div id="metrics-panel" class="co-panel">
       <table>
         <tr><td>FPS</td><td class="value" id="stat-fps">--</td></tr>
         <tr><td>FRAME</td><td class="value" id="stat-frame">--</td></tr>
         <tr><td>TARGETS</td><td class="value" id="stat-targets">--</td></tr>
         <tr><td>AVG CONF</td><td class="value" id="stat-conf">--</td></tr>
+        <tr><td>STREAKS</td><td class="value" id="stat-streaks">--</td></tr>
       </table>
     </div>
 

@@ -17,12 +17,13 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
 import requests
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -30,7 +31,11 @@ from pydantic import BaseModel
 from core.launch_window import LAUNCH_SITES, LaunchTarget
 from core.propagator import Propagator
 from core.tle_manager import GROUPS, TLEManager
+from cv.fits_ingest import is_fits_path, load_fits_image
+from cv.hud import draw_label, draw_reticle
 from cv.iss_live import resolve_iss_stream_url
+from cv.open_vocabulary import DEFAULT_SPACE_QUERIES, OpenVocabularyDetector
+from cv.streak_detection import draw_streaks, detect_streaks
 from cv.streamer import FrameProcessor, build_sample_video, encode_jpeg
 from data.nasa_cneos import CNEOSClient
 from data.space_weather import fetch_current_snapshot
@@ -437,6 +442,17 @@ def _get_cv_processor() -> FrameProcessor:
     return _cv_processor
 
 
+_open_vocab_detector: OpenVocabularyDetector | None = None
+
+
+def _get_open_vocab_detector() -> OpenVocabularyDetector:
+    """Lazily instantiate OWL-ViT once (its weights are a separate ~600MB download/load from YOLO's)."""
+    global _open_vocab_detector
+    if _open_vocab_detector is None:
+        _open_vocab_detector = OpenVocabularyDetector()
+    return _open_vocab_detector
+
+
 @app.get("/cv")
 def cv_page():
     return FileResponse(f"{STATIC_DIR}/cv.html")
@@ -455,6 +471,96 @@ async def cv_upload(file: UploadFile = File(...)):
     _cv_upload_state["path"] = dest
 
     return {"filename": dest.name, "size_bytes": len(contents)}
+
+
+@app.post("/api/cv/identify")
+async def cv_identify(file: UploadFile = File(...), text_queries: str = Form("")):
+    """
+    One-shot "what is this image?" tool: runs classical streak detection
+    (satellite/debris trails — cv.streak_detection) AND zero-shot
+    open-vocabulary detection (cv.open_vocabulary's OWL-ViT, matched
+    against `text_queries`) on a single uploaded image, and returns both
+    results plus one HUD-annotated preview image.
+
+    Unlike /ws/cv's real-time stream, this is a deliberately slower,
+    one-off analysis endpoint — OWL-ViT's transformer forward pass runs
+    at roughly 1-3 FPS on CPU, far below /ws/cv's target frame rate (see
+    cv/open_vocabulary.py's module docstring for why it's kept separate).
+
+    Args:
+        file: an image file — FITS (.fits/.fit/.fts, real telescope data)
+            or a standard format (JPEG/PNG/etc.).
+        text_queries: comma-separated list of things to look for (e.g.
+            "satellite, solar panel, asteroid"); if empty, uses
+            cv.open_vocabulary.DEFAULT_SPACE_QUERIES.
+    """
+    suffix = Path(file.filename or "upload.jpg").suffix
+    contents = await file.read()
+
+    CV_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = CV_UPLOAD_DIR / f"identify_{int(datetime.now().timestamp())}{suffix}"
+    temp_path.write_bytes(contents)
+
+    try:
+        if is_fits_path(temp_path):
+            fits_image = await asyncio.to_thread(load_fits_image, temp_path)
+            image, wcs = fits_image.data_bgr, fits_image.wcs
+        else:
+            image = await asyncio.to_thread(cv2.imread, str(temp_path))
+            wcs = None
+            if image is None:
+                raise HTTPException(400, "Could not read image (not valid FITS or a format OpenCV supports)")
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    queries = [q.strip() for q in text_queries.split(",") if q.strip()] or DEFAULT_SPACE_QUERIES
+
+    streaks = await asyncio.to_thread(detect_streaks, image, wcs)
+    # detect_streaks() is designed for sparse star-field astronomical
+    # images; a busy real-world photo (cables, panel edges, equipment
+    # frames) can legitimately match "long straight bright line" hundreds
+    # of times over. Streaks are already sorted longest-first, so capping
+    # here keeps the response sane without changing the detector itself
+    # (which is correct for its actual intended input).
+    MAX_STREAKS_IN_RESPONSE = 25
+    streaks = streaks[:MAX_STREAKS_IN_RESPONSE]
+
+    try:
+        detector = _get_open_vocab_detector()
+        zero_shot_detections = await asyncio.to_thread(detector.detect, image, queries)
+    except Exception as e:
+        # OWL-ViT weights failing to load/download shouldn't take down
+        # streak detection, which has no such external dependency.
+        zero_shot_detections = []
+        zero_shot_error = str(e)
+    else:
+        zero_shot_error = None
+
+    annotated = image.copy()
+    draw_streaks(annotated, streaks)
+    for det in zero_shot_detections:
+        draw_reticle(annotated, det.box_xyxy, (0, 255, 255))
+        draw_label(annotated, det.box_xyxy, f"{det.class_name.upper()} {det.confidence:.2f}", (0, 255, 255))
+
+    jpeg_bytes = await asyncio.to_thread(encode_jpeg, annotated)
+
+    return {
+        "streaks": [
+            {
+                "start": s.start, "end": s.end, "length_px": s.length_px,
+                "angle_deg": s.angle_deg, "mean_brightness": s.mean_brightness,
+                "start_sky": s.start_sky, "end_sky": s.end_sky,
+            }
+            for s in streaks
+        ],
+        "detections": [
+            {"class_name": d.class_name, "confidence": d.confidence, "box_xyxy": d.box_xyxy}
+            for d in zero_shot_detections
+        ],
+        "zero_shot_error": zero_shot_error,
+        "annotated_image_base64": base64.b64encode(jpeg_bytes).decode("ascii"),
+        "has_wcs": wcs is not None,
+    }
 
 
 async def _open_video_capture(source: str) -> tuple[cv2.VideoCapture | None, str, str | None]:

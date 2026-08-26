@@ -144,5 +144,65 @@ async function uploadVideo() {
   }
 }
 
+async function identifyImage() {
+  const fileInput = document.getElementById('identify-file');
+  const statusEl = document.getElementById('identify-status');
+  if (!fileInput.files.length) {
+    statusEl.textContent = 'NO FILE SELECTED';
+    return;
+  }
+
+  // Zero-shot identification is a one-off analysis, not a stream — stop
+  // any active /ws/cv connection first so it doesn't fight over the
+  // <img> element with the identify result.
+  stopStream();
+
+  const queries = document.getElementById('identify-queries').value;
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  formData.append('text_queries', queries);
+
+  statusEl.textContent = 'ANALYZING… (zero-shot detection is slower than the live stream)';
+  try {
+    const resp = await fetch('/api/cv/identify', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+
+    placeholder.style.display = 'none';
+    videoImg.style.display = 'block';
+    videoImg.src = `data:image/jpeg;base64,${data.annotated_image_base64}`;
+
+    document.getElementById('stat-targets').textContent = data.detections.length;
+    document.getElementById('stat-streaks').textContent = data.streaks.length;
+    document.getElementById('stat-fps').textContent = '--';
+    document.getElementById('stat-frame').textContent = '--';
+    document.getElementById('stat-conf').textContent = data.detections.length
+      ? (data.detections.reduce((s, d) => s + d.confidence, 0) / data.detections.length).toFixed(2)
+      : '--';
+
+    const listEl = document.getElementById('detections-list');
+    const rows = [];
+    for (const d of data.detections) {
+      rows.push(`<div class="det-row"><b>${d.class_name.toUpperCase()}</b> — ${(d.confidence * 100).toFixed(0)}% (zero-shot)</div>`);
+    }
+    for (const s of data.streaks) {
+      const skyInfo = s.start_sky ? ` &middot; RA/Dec ${s.start_sky[0].toFixed(2)}, ${s.start_sky[1].toFixed(2)}` : '';
+      rows.push(`<div class="det-row" style="border-left-color:var(--co-amber);"><b>STREAK</b> — ${s.length_px.toFixed(0)}px @ ${s.angle_deg.toFixed(0)}&deg;${skyInfo}</div>`);
+    }
+    listEl.innerHTML = rows.length ? rows.join('') : '<div class="dim">NO TARGETS ACQUIRED</div>';
+
+    let statusMsg = `DONE — ${data.detections.length} ZERO-SHOT MATCH(ES), ${data.streaks.length} STREAK(S)`;
+    if (data.has_wcs) statusMsg += ' — WCS PRESENT (sky coords available)';
+    if (data.zero_shot_error) statusMsg += ` — ZERO-SHOT ERROR: ${data.zero_shot_error}`;
+    statusEl.textContent = statusMsg;
+  } catch (err) {
+    statusEl.textContent = `FAILED: ${err.message || err}`;
+  }
+}
+
 startBtn.addEventListener('click', startStream);
 document.getElementById('cv-upload-btn').addEventListener('click', uploadVideo);
+document.getElementById('identify-btn').addEventListener('click', identifyImage);

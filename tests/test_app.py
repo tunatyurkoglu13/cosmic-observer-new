@@ -300,6 +300,48 @@ def test_cv_upload_rejects_non_video_content_type():
     assert resp.status_code == 400
 
 
+@pytest.mark.network
+@pytest.mark.slow
+def test_cv_identify_real_nasa_photo_finds_people_and_returns_annotated_image():
+    """
+    Full pipeline over the real /api/cv/identify endpoint: downloads a
+    real NASA photo (GRACE-FO satellites in a cleanroom, 4 people
+    visible — known ground truth), uploads it, and verifies both streak
+    detection and zero-shot OWL-ViT detection ran for real and an
+    annotated preview image came back.
+    """
+    resp = requests.get("https://images-assets.nasa.gov/image/PIA22443/PIA22443~small.jpg", timeout=15)
+    resp.raise_for_status()
+
+    upload_resp = client.post(
+        "/api/cv/identify",
+        files={"file": ("grace_fo.jpg", resp.content, "image/jpeg")},
+        data={"text_queries": "satellite, solar panel, person"},
+    )
+    assert upload_resp.status_code == 200
+    data = upload_resp.json()
+
+    assert "streaks" in data
+    assert "detections" in data
+    assert data["has_wcs"] is False  # plain JPEG, no WCS
+    assert len(data["annotated_image_base64"]) > 0
+
+    person_detections = [d for d in data["detections"] if d["class_name"] == "person"]
+    assert len(person_detections) >= 1
+
+    import base64
+    jpeg_bytes = base64.b64decode(data["annotated_image_base64"])
+    assert jpeg_bytes[:2] == b"\xff\xd8"
+
+
+def test_cv_identify_rejects_unreadable_file():
+    resp = client.post(
+        "/api/cv/identify",
+        files={"file": ("garbage.jpg", b"not an image", "image/jpeg")},
+    )
+    assert resp.status_code == 400
+
+
 def test_cv_upload_accepts_video_file(tmp_path):
     fake_video_bytes = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100  # not a real mp4, just exercises the upload path
     resp = client.post(
