@@ -18,15 +18,20 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import cv2
 import requests
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.launch_window import LAUNCH_SITES, LaunchTarget
 from core.propagator import Propagator
 from core.tle_manager import GROUPS, TLEManager
+from cv.iss_live import resolve_iss_stream_url
+from cv.streamer import FrameProcessor, build_sample_video, encode_jpeg
 from data.nasa_cneos import CNEOSClient
 from data.space_weather import fetch_current_snapshot
 from reports.launch_analysis import generate_launch_analysis
@@ -39,7 +44,9 @@ app = FastAPI(title="COSMIC OBSERVER", version="1.0.0")
 
 tle_manager = TLEManager()
 
-STATIC_DIR = __file__.rsplit("/", 1)[0] + "/static"
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = str(BASE_DIR / "static")
+CV_UPLOAD_DIR = BASE_DIR / "data" / "cv_uploads"
 
 
 def _safe_fetch_group(group: str, limit: int | None = None) -> list:
@@ -409,6 +416,170 @@ async def ws_positions(websocket: WebSocket, group: str = "stations", interval_s
             await asyncio.sleep(interval_seconds)
     except WebSocketDisconnect:
         pass
+
+
+# ---------------------------------------------------------------------------
+# CV module — a separate page (/cv) with its own retro HUD-overlaid video
+# pipeline (real YOLOv8 detection + cv.hud drawing from Phase 6/this
+# phase), streamed over its own WebSocket rather than folded into the
+# main dashboard's /ws/positions.
+# ---------------------------------------------------------------------------
+
+_cv_processor: FrameProcessor | None = None
+_cv_upload_state: dict[str, Path] = {}
+
+
+def _get_cv_processor() -> FrameProcessor:
+    """Lazily instantiate the YOLO-backed processor once (loading weights is expensive; don't do it at import time)."""
+    global _cv_processor
+    if _cv_processor is None:
+        _cv_processor = FrameProcessor()
+    return _cv_processor
+
+
+@app.get("/cv")
+def cv_page():
+    return FileResponse(f"{STATIC_DIR}/cv.html")
+
+
+@app.post("/api/cv/upload")
+async def cv_upload(file: UploadFile = File(...)):
+    """Upload a video file to use as the /ws/cv?source=upload frame source."""
+    if file.content_type and not file.content_type.startswith("video/"):
+        raise HTTPException(400, f"Expected a video file, got content-type '{file.content_type}'")
+
+    CV_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = CV_UPLOAD_DIR / (file.filename or "upload.mp4")
+    contents = await file.read()
+    dest.write_bytes(contents)
+    _cv_upload_state["path"] = dest
+
+    return {"filename": dest.name, "size_bytes": len(contents)}
+
+
+async def _open_video_capture(source: str) -> tuple[cv2.VideoCapture | None, str, str | None]:
+    """
+    Open a cv2.VideoCapture for the requested source.
+
+    Returns (capture_or_None, effective_label, notice). `notice` is a
+    human-readable string set when we fell back from what was actually
+    requested (e.g. ISS live unreachable -> sample clip) — the caller
+    sends this to the client so a fallback is disclosed, never silent.
+    `capture_or_None` is None only when even the fallback failed.
+    """
+    if source == "upload":
+        video_path = _cv_upload_state.get("path")
+        if video_path is None or not video_path.exists():
+            return None, "UPLOAD", "No video uploaded yet. POST /api/cv/upload first, or use source=sample."
+        cap = await asyncio.to_thread(cv2.VideoCapture, str(video_path))
+        if not cap.isOpened():
+            return None, "UPLOAD", f"Could not open uploaded file: {video_path}"
+        return cap, "UPLOAD", None
+
+    if source == "iss_live":
+        try:
+            stream = await asyncio.to_thread(resolve_iss_stream_url)
+        except RuntimeError as e:
+            sample_path = await asyncio.to_thread(build_sample_video)
+            cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
+            return cap, "SAMPLE", f"ISS live stream unavailable ({e}) — showing sample clip instead."
+
+        cap = await asyncio.to_thread(cv2.VideoCapture, stream.url)
+        if not cap.isOpened():
+            sample_path = await asyncio.to_thread(build_sample_video)
+            cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
+            return cap, "SAMPLE", "ISS live stream could not be opened — showing sample clip instead."
+        return cap, "ISS LIVE", None
+
+    sample_path = await asyncio.to_thread(build_sample_video)
+    cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
+    return cap, "SAMPLE", None
+
+
+@app.websocket("/ws/cv")
+async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float = 8.0):
+    """
+    Stream HUD-annotated, YOLOv8-detected frames from a video source.
+
+    Each iteration sends two WebSocket messages: a binary JPEG frame,
+    then a JSON text message with that frame's detection list and
+    rolling metrics (FPS, count, avg confidence) — kept separate rather
+    than base64-embedding the image in the JSON, so the browser can hand
+    the binary frame straight to an <img>/Blob URL without any decoding
+    overhead on the hot path.
+
+    Args:
+        source: "sample" (bundled demo clip, built on first use from real
+            Ultralytics sample imagery), "upload" (the most recently
+            uploaded file via POST /api/cv/upload), or "iss_live" (NASA's
+            real, currently-live ISS video feed, resolved via
+            cv.iss_live — falls back to "sample" with a disclosed notice
+            if the live feed is unreachable).
+        target_fps: pacing cap for the stream.
+    """
+    await websocket.accept()
+
+    cap, label, notice = await _open_video_capture(source)
+    if cap is None:
+        # Nothing playable at all (e.g. no upload yet) — this is a hard
+        # failure, not a disclosed fallback, so it's an "error".
+        await websocket.send_json({"error": notice})
+        await websocket.close()
+        return
+    if notice:
+        # We got a stream, but not the one requested (e.g. ISS live
+        # unreachable -> sample clip) — disclose it, but keep streaming.
+        await websocket.send_json({"notice": notice})
+
+    processor = _get_cv_processor()
+    interval_s = 1.0 / target_fps if target_fps > 0 else 0.1
+    is_live = label == "ISS LIVE"
+
+    try:
+        while True:
+            ok, frame = await asyncio.to_thread(cap.read)
+            if not ok:
+                if is_live:
+                    # A live feed doesn't "end" the way a file does — a
+                    # failed read means the signed URL likely expired or
+                    # there was a transient network hiccup. Re-resolve
+                    # and reopen rather than looping back to "frame 0"
+                    # (which makes no sense for a live stream).
+                    await asyncio.to_thread(cap.release)
+                    try:
+                        stream = await asyncio.to_thread(resolve_iss_stream_url, force=True)
+                        cap = await asyncio.to_thread(cv2.VideoCapture, stream.url)
+                        if not cap.isOpened():
+                            raise RuntimeError("re-opened capture failed to open")
+                        continue
+                    except RuntimeError as e:
+                        await websocket.send_json({"error": f"ISS live stream lost and could not reconnect: {e}"})
+                        break
+                else:
+                    await asyncio.to_thread(cap.set, cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = await asyncio.to_thread(cap.read)
+                    if not ok:
+                        await websocket.send_json({"error": "Video ended and could not be replayed"})
+                        break
+
+            result = await asyncio.to_thread(processor.process, frame, label)
+            jpeg_bytes = await asyncio.to_thread(encode_jpeg, result.frame_bgr)
+
+            await websocket.send_bytes(jpeg_bytes)
+            await websocket.send_json({
+                "detections": [
+                    {"class_name": d.class_name, "confidence": d.confidence, "box_xyxy": d.box_xyxy}
+                    for d in result.detections
+                ],
+                "fps": result.metrics.fps,
+                "frame_index": result.metrics.frame_index,
+                "avg_confidence": result.metrics.avg_confidence,
+            })
+            await asyncio.sleep(interval_s)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await asyncio.to_thread(cap.release)
 
 
 # ---------------------------------------------------------------------------

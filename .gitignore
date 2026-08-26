@@ -12,3 +12,5 @@ data/cache/
 *.pt
 runs/
 models/
+data/cv_uploads/
+static/cv_sample.mp4

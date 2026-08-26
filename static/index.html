@@ -109,6 +109,7 @@
     <div id="title-panel" class="co-panel">
       <h1>COSMIC OBSERVER</h1>
       <div class="subtitle">SPACE DOMAIN AWARENESS // TRACKING GRID ONLINE</div>
+      <a href="/cv" class="co-btn" style="display:inline-block;width:auto;margin-top:8px;text-decoration:none;">&#9889; ISS CV MODULE</a>
     </div>
 
     <div id="info-panel" class="co-panel">
@@ -138,8 +139,8 @@
       <div class="legend-row"><span class="legend-swatch diamond" style="background: #ffffff; color: #ffffff;"></span> LAUNCH SITE</div>
 
       <div class="legend-subhead">LINES</div>
+      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-cyan); color: var(--co-cyan); opacity: 0.85;"></span> CONTINENT OUTLINE</div>
       <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-amber); color: var(--co-amber);"></span> STATION ORBIT PATH (1 rev)</div>
-      <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-cyan); color: var(--co-cyan);"></span> DAY/NIGHT TERMINATOR</div>
 
       <div class="legend-subhead">COLA ROCKET PATH</div>
       <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-phosphor-green); color: var(--co-phosphor-green);"></span> CLEAR (safe margin)</div>
@@ -152,7 +153,6 @@
         <tr><td>TRACKED</td><td class="value" id="stat-count">--</td></tr>
         <tr><td>FRAME</td><td class="value" id="stat-frame">--</td></tr>
         <tr><td>EPOCH (UTC)</td><td class="value" id="stat-epoch">--</td></tr>
-        <tr><td>SUBSOLAR</td><td class="value" id="stat-subsolar">--</td></tr>
       </table>
     </div>
   </div>
@@ -170,7 +170,8 @@
 {
   "imports": {
     "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "topojson-client": "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm"
   }
 }
 </script>

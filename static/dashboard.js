@@ -4,6 +4,16 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { feature as topoFeature } from 'topojson-client';
+
+// Real 110m-resolution world coastlines (Natural Earth data via the
+// world-atlas package), decoded client-side and drawn using this app's
+// OWN lat/lon -> xyz placement function (latLonAltToVector3) — the exact
+// same function used for every satellite and launch-site marker. This
+// guarantees the continents can never be mismatched/mirrored relative to
+// everything else in the scene, since there is no separate texture/UV
+// mapping involved at all, only shared coordinate math.
+const LAND_TOPOLOGY_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json';
 
 const R_EARTH_KM = 6378.137;
 const GLOBE_RADIUS = 4.0; // scene units representing R_EARTH_KM
@@ -64,58 +74,6 @@ function makeCircleSprite(colorHex) {
   return new THREE.CanvasTexture(canvas);
 }
 
-const EARTH_VERTEX_SHADER = `
-varying vec3 vNormal;
-void main() {
-  // Deliberately OBJECT-space (not normalMatrix * normal, which is
-  // view-space and rotates with the camera). The Earth mesh itself
-  // never rotates or moves — only the camera orbits around it via
-  // OrbitControls — so object space IS world space here, and it must
-  // match the fixed Earth frame every satellite/launch-site/ground-track
-  // position is placed in (see latLonAltToVector3). Using the view-space
-  // normal made the lat/lon computed in the fragment shader silently
-  // drift as the camera moved, desyncing the map from real positions.
-  vNormal = normalize(normal);
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}
-`;
-
-const EARTH_FRAGMENT_SHADER = `
-uniform vec3 uSunDir;
-uniform sampler2D uDayMap;
-uniform sampler2D uNightMap;
-uniform vec3 uGridColor;
-varying vec3 vNormal;
-
-#define PI 3.14159265
-
-void main() {
-  vec3 n = normalize(vNormal);
-  float ndotl = dot(n, normalize(uSunDir));
-
-  // Same lat/lon this app computes everywhere else (core.propagator /
-  // dashboard.js latLonAltToVector3), re-derived from the surface
-  // normal so the day/night texture lookup lines up exactly with where
-  // satellites, launch sites, and ground tracks are plotted.
-  float lat = asin(clamp(n.y, -1.0, 1.0));
-  float lon = atan(n.z, n.x);
-  vec2 uv = vec2(lon / (2.0 * PI) + 0.5, 0.5 - lat / PI);
-
-  vec3 dayColor = texture2D(uDayMap, uv).rgb;
-  vec3 nightColor = texture2D(uNightMap, uv).rgb;
-  vec3 base = mix(nightColor, dayColor, smoothstep(-0.15, 0.15, ndotl));
-
-  // Faint reference grid every 30 deg, kept subtle so the real map reads
-  // clearly underneath — a HUD overlay, not the primary visual anymore.
-  float latGrid = abs(fract(lat / PI * 6.0 + 0.5) - 0.5) * 2.0;
-  float lonGrid = abs(fract(lon / PI * 6.0 + 0.5) - 0.5) * 2.0;
-  float gridLine = 1.0 - smoothstep(0.0, 0.02, min(latGrid, lonGrid));
-
-  vec3 color = mix(base, uGridColor, gridLine * 0.15);
-  gl_FragColor = vec4(color, 1.0);
-}
-`;
-
 const ATMOSPHERE_VERTEX_SHADER = `
 varying vec3 vNormal;
 void main() {
@@ -143,7 +101,6 @@ class Dashboard {
     this._buildEarth();
     this._buildSatellites();
     this._buildGroundTracks();
-    this._buildTerminator();
     this._initHud();
     this._initPicking();
     this._buildLaunchSites();
@@ -183,38 +140,17 @@ class Dashboard {
   }
 
   _buildEarth() {
-    // Real day/night Earth imagery (NASA-derived textures shipped with
-    // three.js's own examples) so continents are actually recognizable —
-    // sampled in the shader using this app's own lat/lon convention (see
-    // EARTH_FRAGMENT_SHADER), so the map lines up exactly with where
-    // satellites, launch sites, and ground tracks get plotted.
-    const textureLoader = new THREE.TextureLoader();
-    const TEXTURE_BASE = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/';
-    const dayMap = textureLoader.load(TEXTURE_BASE + 'earth_atmos_2048.jpg');
-    const nightMap = textureLoader.load(TEXTURE_BASE + 'earth_lights_2048.png');
-    dayMap.colorSpace = THREE.SRGBColorSpace;
-    nightMap.colorSpace = THREE.SRGBColorSpace;
-    // THREE.TextureLoader defaults flipY=true (auto-flips the image
-    // vertically on upload, since WebGL's texture-space origin is
-    // bottom-left while image files are stored top-down). Our fragment
-    // shader computes UV directly from real lat/lon with row 0 = north
-    // pole (verified pixel-by-pixel against the raw file), so that
-    // automatic flip must be disabled or the map renders upside-down.
-    dayMap.flipY = false;
-    nightMap.flipY = false;
-
+    // Plain dark sphere — no day/night, no texture/UV mapping at all
+    // (removed per explicit request: no sun simulation, and a texture's
+    // own UV convention is one more thing that can silently disagree
+    // with this app's coordinate math). Continents are drawn separately
+    // in _buildContinentOutlines() as real coastline geometry placed
+    // with this app's own lat/lon -> xyz function — the same one used
+    // for every satellite and launch-site marker — so there is no way
+    // for the map to disagree with where anything else is plotted.
     const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 64, 64);
-    this.earthMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uSunDir: { value: new THREE.Vector3(1, 0, 0) },
-        uDayMap: { value: dayMap },
-        uNightMap: { value: nightMap },
-        uGridColor: { value: new THREE.Color(PALETTE.cyan) },
-      },
-      vertexShader: EARTH_VERTEX_SHADER,
-      fragmentShader: EARTH_FRAGMENT_SHADER,
-    });
-    this.earth = new THREE.Mesh(geometry, this.earthMaterial);
+    const material = new THREE.MeshBasicMaterial({ color: 0x03060c });
+    this.earth = new THREE.Mesh(geometry, material);
     this.scene.add(this.earth);
 
     const atmoGeometry = new THREE.SphereGeometry(GLOBE_RADIUS * 1.08, 64, 64);
@@ -227,6 +163,50 @@ class Dashboard {
       transparent: true,
     });
     this.scene.add(new THREE.Mesh(atmoGeometry, atmoMaterial));
+
+    this._buildContinentOutlines();
+  }
+
+  _buildContinentOutlines() {
+    fetch(LAND_TOPOLOGY_URL)
+      .then((r) => r.json())
+      .then((topology) => {
+        const geo = topoFeature(topology, topology.objects.land);
+        const polygons = [];
+        for (const f of geo.features) {
+          const geomType = f.geometry.type;
+          const polys = geomType === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+          for (const poly of polys) polygons.push(...poly); // each poly = array of rings; flatten to rings
+        }
+
+        const material = new THREE.LineBasicMaterial({ color: PALETTE.cyan, transparent: true, opacity: 0.85 });
+        const outlineRadius = 5; // km above the surface, avoids z-fighting with the base sphere
+
+        for (const ring of polygons) {
+          // Split at antimeridian crossings so a ring spanning +/-180 deg
+          // longitude draws as separate arcs instead of one spurious
+          // line slicing straight across the globe's interior.
+          let segment = [];
+          let prevLon = null;
+          const segments = [segment];
+
+          for (const [lon, lat] of ring) {
+            if (prevLon !== null && Math.abs(lon - prevLon) > 180) {
+              segment = [];
+              segments.push(segment);
+            }
+            segment.push(latLonAltToVector3(lat, lon, outlineRadius));
+            prevLon = lon;
+          }
+
+          for (const seg of segments) {
+            if (seg.length < 2) continue;
+            const geometry = new THREE.BufferGeometry().setFromPoints(seg);
+            this.scene.add(new THREE.Line(geometry, material));
+          }
+        }
+      })
+      .catch((err) => console.error('Failed to load continent outlines:', err));
   }
 
   _buildSatellites() {
@@ -290,14 +270,6 @@ class Dashboard {
         this.trackLines.push(line);
       }
     }
-  }
-
-  _buildTerminator() {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
-    const material = new THREE.LineBasicMaterial({ color: PALETTE.cyan, transparent: true, opacity: 0.5 });
-    this.terminatorLine = new THREE.LineLoop(geometry, material);
-    this.scene.add(this.terminatorLine);
   }
 
   _initHud() {
@@ -389,18 +361,8 @@ class Dashboard {
       this.issPoint.geometry.attributes.position.needsUpdate = true;
     }
 
-    const [subLat, subLon] = this.snapshot.subsolar_track[frameIndex];
-    const sunDir = latLonAltToVector3(subLat, subLon, 0).normalize();
-    this.earthMaterial.uniforms.uSunDir.value.copy(sunDir);
-
-    const terminator = this.snapshot.terminator_tracks[frameIndex];
-    const termPoints = terminator.map(([lat, lon]) => latLonAltToVector3(lat, lon, 5));
-    this.terminatorLine.geometry.dispose();
-    this.terminatorLine.geometry = new THREE.BufferGeometry().setFromPoints(termPoints);
-
     document.getElementById('stat-frame').textContent = `${frameIndex + 1} / ${this.snapshot.frame_times_iso.length}`;
     document.getElementById('stat-epoch').textContent = this.snapshot.frame_times_iso[frameIndex].replace('T', ' ').slice(0, 19);
-    document.getElementById('stat-subsolar').textContent = `${subLat.toFixed(1)}°, ${subLon.toFixed(1)}°`;
     document.getElementById('time-readout').textContent = this.snapshot.frame_times_iso[frameIndex].replace('T', ' ').slice(0, 19) + ' UTC';
   }
 

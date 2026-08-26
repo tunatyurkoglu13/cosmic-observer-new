@@ -274,3 +274,102 @@ def test_ws_positions_rejects_unknown_group():
     with client.websocket_connect("/ws/positions?group=not-a-real-group") as ws:
         message = ws.receive_json()
         assert "error" in message
+
+
+# ---------------------------------------------------------------------------
+# CV module
+# ---------------------------------------------------------------------------
+
+def test_cv_page_serves_html():
+    resp = client.get("/cv")
+    assert resp.status_code == 200
+    assert "ISS CV MODULE" in resp.text
+
+
+def test_cv_static_assets_resolve():
+    for asset in ("cv.js",):
+        resp = client.get(f"/{asset}")
+        assert resp.status_code == 200
+
+
+def test_cv_upload_rejects_non_video_content_type():
+    resp = client.post(
+        "/api/cv/upload",
+        files={"file": ("notes.txt", b"hello world", "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+def test_cv_upload_accepts_video_file(tmp_path):
+    fake_video_bytes = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100  # not a real mp4, just exercises the upload path
+    resp = client.post(
+        "/api/cv/upload",
+        files={"file": ("test_clip.mp4", fake_video_bytes, "video/mp4")},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["filename"] == "test_clip.mp4"
+    assert data["size_bytes"] == len(fake_video_bytes)
+
+
+@pytest.mark.network
+@pytest.mark.slow
+def test_ws_cv_iss_live_source_streams_real_frame_when_available():
+    """
+    Real end-to-end check against NASA's actual live feed. If it happens
+    to be unreachable at test time, the endpoint must still work by
+    disclosing a fallback notice and continuing with the sample clip —
+    both outcomes are asserted as acceptable, since NASA's feed uptime is
+    outside this project's control (see cv/iss_live.py's docstring).
+    """
+    with client.websocket_connect("/ws/cv?source=iss_live&target_fps=1000") as ws:
+        first = ws.receive()
+        if "text" in first:
+            # A fallback notice arrived before the first frame.
+            import json
+            payload = json.loads(first["text"])
+            assert "notice" in payload
+            frame_bytes = ws.receive_bytes()
+        else:
+            frame_bytes = first["bytes"]
+
+        assert frame_bytes[:2] == b"\xff\xd8"  # JPEG magic bytes
+        meta = ws.receive_json()
+        assert "detections" in meta or "notice" in meta
+
+
+def test_ws_cv_iss_live_falls_back_to_sample_when_unreachable():
+    """Regression test: an unreachable ISS live feed must degrade to the sample clip with a disclosed notice, not fail silently or crash."""
+    with patch("app.resolve_iss_stream_url", side_effect=RuntimeError("simulated: stream not live")):
+        with client.websocket_connect("/ws/cv?source=iss_live&target_fps=1000") as ws:
+            notice_msg = ws.receive_json()
+            assert "notice" in notice_msg
+            assert "sample" in notice_msg["notice"].lower()
+
+            frame_bytes = ws.receive_bytes()
+            assert frame_bytes[:2] == b"\xff\xd8"
+
+
+@pytest.mark.slow
+def test_ws_cv_sample_source_streams_real_annotated_frame():
+    """
+    Full pipeline over the WebSocket, real components: builds the sample
+    clip from real Ultralytics imagery on first use, runs real YOLOv8
+    detection + HUD annotation, and streams back a real JPEG frame
+    followed by a JSON detections/metrics message.
+    """
+    with client.websocket_connect("/ws/cv?source=sample&target_fps=1000") as ws:
+        frame_bytes = ws.receive_bytes()
+        assert len(frame_bytes) > 0
+        assert frame_bytes[:2] == b"\xff\xd8"  # JPEG magic bytes
+
+        meta = ws.receive_json()
+        assert "detections" in meta
+        assert "fps" in meta
+        assert "frame_index" in meta
+
+
+def test_ws_cv_upload_source_without_upload_returns_error():
+    with client.websocket_connect("/ws/cv?source=upload") as ws:
+        message = ws.receive_json()
+        assert "error" in message

@@ -25,7 +25,9 @@ pydantic==2.5.0
 python-dotenv==1.0.0
 pytest==7.4.3
 opencv-python-headless
+python-multipart
 torch
 torchvision
 ultralytics
 scikit-learn
+yt-dlp
