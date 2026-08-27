@@ -49,6 +49,10 @@
   #info-panel td { padding: 2px 6px 2px 0; vertical-align: top; }
   #info-panel td:first-child { color: var(--co-amber); white-space: nowrap; }
 
+  #celestial-panel h3 { font-size: 12px; letter-spacing: 0.1em; margin: 0 0 8px 0; color: var(--co-amber); }
+  #celestial-panel select { background: rgba(0,255,255,0.05); border: 1px solid var(--co-cyan); color: var(--co-cyan); font-family: var(--co-font); font-size: 11px; padding: 2px 4px; width: 130px; }
+  #celestial-status { margin-top: 6px; font-size: 10px; min-height: 14px; }
+
   #mission-planner-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   #mission-planner-panel h3 { font-size: 12px; letter-spacing: 0.1em; margin: 0 0 8px 0; color: var(--co-amber); }
   .mp-row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; gap: 8px; }
@@ -116,6 +120,12 @@
       <div class="dim">SELECT AN OBJECT&hellip;</div>
     </div>
 
+    <div id="celestial-panel" class="co-panel">
+      <h3>CELESTIAL BODY</h3>
+      <div class="mp-row"><label>DESTINATION</label><select id="body-select"><option value="earth">EARTH</option></select></div>
+      <div id="celestial-status" class="dim">EARTH — HOME VIEW</div>
+    </div>
+
     <div id="mission-planner-panel" class="co-panel">
       <h3>MISSION PLANNER — COLA</h3>
       <div class="mp-row"><label>LAUNCH SITE</label><select id="mp-site"></select></div>
@@ -137,6 +147,7 @@
       <div class="legend-row"><span class="legend-swatch" style="background: var(--co-magenta); color: var(--co-magenta);"></span> DEBRIS</div>
       <div class="legend-row"><span class="legend-swatch" style="background: var(--co-phosphor-green); color: var(--co-phosphor-green);"></span> ISS (ZARYA)</div>
       <div class="legend-row"><span class="legend-swatch diamond" style="background: #ffffff; color: #ffffff;"></span> LAUNCH SITE</div>
+      <div class="legend-row"><span class="legend-swatch" style="background: #cc66ff; color: #cc66ff;"></span> ASTEROID/COMET (real, JPL SBDB)</div>
 
       <div class="legend-subhead">LINES</div>
       <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-cyan); color: var(--co-cyan); opacity: 0.85;"></span> CONTINENT OUTLINE</div>

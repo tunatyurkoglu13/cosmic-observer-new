@@ -40,6 +40,8 @@ from cv.streamer import FrameProcessor, build_sample_video, encode_jpeg
 from data.nasa_cneos import CNEOSClient
 from data.neows import NeoWsClient
 from data.sbdb import SBDBClient
+from data.small_bodies import CURATED_BODIES as SMALL_BODIES, SmallBodyTracker
+from data.solar_system import BODIES as SOLAR_SYSTEM_BODIES, SolarSystemClient
 from data.space_weather import fetch_current_snapshot
 from reports.launch_analysis import generate_launch_analysis
 from reports.risk_report import generate_risk_report
@@ -382,6 +384,57 @@ def neo_close_approach(start_date: str | None = None, end_date: str | None = Non
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"count": len(objects), "objects": objects}
+
+
+@app.get("/api/solar-system/bodies")
+def solar_system_bodies():
+    """Static metadata (real radius, display color) for bodies the 3D dashboard can travel to."""
+    return SOLAR_SYSTEM_BODIES
+
+
+@app.get("/api/solar-system/{body}/position")
+def solar_system_position(body: str):
+    """
+    Real-time Earth-centered direction + distance to `body`, from JPL
+    Horizons (see data.solar_system) — used by the 3D dashboard to fly
+    the camera toward the body along its true current direction.
+    """
+    client = SolarSystemClient()
+    try:
+        position = client.fetch_position(body)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except requests.RequestException:
+        raise HTTPException(503, "JPL Horizons is currently unreachable — external service outage, try again shortly.")
+    return position
+
+
+@app.get("/api/small-bodies")
+def small_bodies_list():
+    """Metadata for the curated real asteroids/comets the 3D dashboard can plot (see data.small_bodies)."""
+    return SMALL_BODIES
+
+
+@app.get("/api/small-bodies/{key}/position")
+def small_body_position(key: str):
+    """
+    Real-time Earth-relative position of one curated small body, from its
+    real JPL SBDB orbital elements propagated to now (see
+    data.small_bodies — two-body Kepler propagation, not a full
+    perturbed ephemeris).
+    """
+    try:
+        sun_client = SolarSystemClient()
+        sun_position = sun_client.fetch_position("sun")
+        earth_helio_r_km = tuple(-c for c in sun_position.r_km)
+
+        tracker = SmallBodyTracker()
+        state = tracker.current_position(key, earth_helio_r_km)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except requests.RequestException:
+        raise HTTPException(503, "JPL Horizons/SBDB is currently unreachable — external service outage, try again shortly.")
+    return state
 
 
 @app.get("/api/space-weather")

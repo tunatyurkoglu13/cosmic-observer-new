@@ -23,6 +23,7 @@ const PALETTE = {
   magenta: 0xff0066,
   amber: 0xffcc00,
   phosphorGreen: 0x00ff66,
+  violet: 0xcc66ff,
 };
 
 const CLASS_COLOR = {
@@ -91,6 +92,92 @@ void main() {
 }
 `;
 
+// Procedural cratered-rock look for non-Earth bodies (Mercury first) —
+// no photographic texture (avoids the exact UV/orientation pitfalls this
+// project hit with Earth's original texture, see dashboard.js history),
+// just a muted, realistic base color modulated by fractal value noise
+// sampled in OBJECT space (vPosition), so the crater pattern rotates
+// rigidly with the sphere rather than swimming with the camera.
+const ROCKY_BODY_VERTEX_SHADER = `
+varying vec3 vPosition;
+varying vec3 vNormalWorld;
+void main() {
+  vPosition = position;
+  vNormalWorld = normalize(mat3(modelMatrix) * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const ROCKY_BODY_FRAGMENT_SHADER = `
+uniform vec3 uBaseColor;
+uniform vec3 uLightDir;
+varying vec3 vPosition;
+varying vec3 vNormalWorld;
+
+float hash(vec3 p) {
+  p = fract(p * vec3(443.897, 441.423, 437.195));
+  p += dot(p, p.yzx + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
+float valueNoise(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash(i + vec3(0.0,0.0,0.0)), hash(i + vec3(1.0,0.0,0.0)), f.x),
+        mix(hash(i + vec3(0.0,1.0,0.0)), hash(i + vec3(1.0,1.0,0.0)), f.x), f.y),
+    mix(mix(hash(i + vec3(0.0,0.0,1.0)), hash(i + vec3(1.0,0.0,1.0)), f.x),
+        mix(hash(i + vec3(0.0,1.0,1.0)), hash(i + vec3(1.0,1.0,1.0)), f.x), f.y),
+    f.z);
+}
+
+float fbm(vec3 p) {
+  float v = 0.0;
+  float amp = 0.5;
+  for (int i = 0; i < 5; i++) {
+    v += amp * valueNoise(p);
+    p *= 2.02;
+    amp *= 0.5;
+  }
+  return v;
+}
+
+void main() {
+  float n = fbm(vPosition * 2.4);
+  float craterMask = smoothstep(0.35, 0.68, n);
+  vec3 darkColor = uBaseColor * 0.7;
+  vec3 lightColor = uBaseColor * 1.35;
+  vec3 albedo = mix(darkColor, lightColor, craterMask);
+
+  // Real terminator: uLightDir is the body's own true current direction
+  // toward the Sun (data.solar_system.BodyPosition.sun_direction), not
+  // an arbitrary fixed vector — the lit/unlit split you see actually
+  // matches where the Sun is right now, from that body.
+  float lambert = max(dot(normalize(vNormalWorld), normalize(uLightDir)), 0.0);
+  // Ambient floor kept fairly high (0.42) so the night side stays
+  // readable in a dashboard rather than going physically-accurate pitch
+  // black — a deliberate visibility choice, not a claim of literal
+  // night-side brightness.
+  float ambient = 0.42;
+  vec3 shaded = albedo * (ambient + (1.0 - ambient) * lambert) * 1.25;
+
+  gl_FragColor = vec4(min(shaded, vec3(1.0)), 1.0);
+}
+`;
+
+// Unlit, warm, additively-glowing Sun — same rim-glow technique as
+// ATMOSPHERE_*_SHADER (a real light source has no "far side" to shade).
+const SUN_FRAGMENT_SHADER = `
+uniform vec3 uGlowColor;
+varying vec3 vNormal;
+void main() {
+  float rim = 1.0 - max(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 0.0);
+  vec3 core = uGlowColor * 1.4;
+  gl_FragColor = vec4(mix(core, uGlowColor, rim), 1.0);
+}
+`;
+
 class Dashboard {
   constructor(snapshot) {
     this.snapshot = snapshot;
@@ -99,12 +186,15 @@ class Dashboard {
 
     this._initScene();
     this._buildEarth();
+    this._initSun();
     this._buildSatellites();
     this._buildGroundTracks();
     this._initHud();
     this._initPicking();
     this._buildLaunchSites();
     this._initMissionPlanner();
+    this._initCelestialBodies();
+    this._initSmallBodies();
 
     this._updateFrame(0);
     this._animate();
@@ -131,6 +221,14 @@ class Dashboard {
     // this automatically while the user is dragging and resumes after.
     this.controls.autoRotate = true;
     this.controls.autoRotateSpeed = 0.35;
+
+    // Remembered so "return to Earth" can restore the exact original vantage.
+    this.homeCamera = {
+      position: this.camera.position.clone(),
+      target: new THREE.Vector3(0, 0, 0),
+      minDistance: this.controls.minDistance,
+      maxDistance: this.controls.maxDistance,
+    };
 
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -304,11 +402,17 @@ class Dashboard {
     this.raycaster.setFromCamera(this.mouse, this.camera);
     const pointObjects = Object.values(this.groups).map((g) => g.points);
     if (this.issPoint) pointObjects.push(this.issPoint);
+    if (this.smallBodyPoints) pointObjects.push(this.smallBodyPoints);
 
     const intersects = this.raycaster.intersectObjects(pointObjects);
     if (intersects.length === 0) return;
 
     const hit = intersects[0];
+    if (this.smallBodyPoints && hit.object === this.smallBodyPoints) {
+      this._showSmallBodyInfo(this.smallBodyIndex[hit.index]);
+      return;
+    }
+
     let sat = null;
     if (this.issPoint && hit.object === this.issPoint) {
       sat = this.issSat;
@@ -559,6 +663,281 @@ class Dashboard {
     const material = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
     this.trajectoryLine = new THREE.Line(geometry, material);
     this.scene.add(this.trajectoryLine);
+  }
+
+  // -------------------------------------------------------------------
+  // Celestial body travel — step 1: Mercury.
+  //
+  // Selecting a body fetches its REAL current Earth-relative direction
+  // from JPL Horizons (data.solar_system, via /api/solar-system) and
+  // flies the camera out along that true direction. The body's PHYSICAL
+  // SIZE is rendered to the same real scale Earth already uses
+  // (GLOBE_RADIUS units per R_EARTH_KM); the DISPLAY DISTANCE it's
+  // placed at is not to that same scale (real interplanetary distances
+  // would put it far outside any navigable scene) — see
+  // _displayDistanceUnits(). Passing bodies/moons/comets en route are a
+  // later step, not implemented yet.
+  // -------------------------------------------------------------------
+
+  _initSun() {
+    // The Sun itself, placed along its real current direction from
+    // Earth (same data.solar_system mechanism as any other body) — this
+    // is also what supplies uLightDir for every rocky body's shader
+    // (see _getOrBuildBody), so Mercury's lit side is genuinely the side
+    // actually facing the Sun right now, not an arbitrary fixed angle.
+    fetch('/api/solar-system/sun/position')
+      .then((r) => r.json())
+      .then((position) => this._buildSun(position))
+      .catch((err) => console.error('Failed to load Sun position:', err));
+  }
+
+  _buildSun(position) {
+    // The Sun's TRUE size (radius_km=696,000, ~109x Earth's) would dwarf
+    // this entire scene at the same scale factor everything else uses —
+    // its displayed radius here is a fixed, compressed dramatization
+    // (like body travel distances, see _displayDistanceUnits), not a
+    // to-scale rendering. Its DIRECTION from Earth is real.
+    const displayRadius = 2.6;
+    const displayDistance = this._displayDistanceUnits(position.distance_km) + 10;
+
+    const direction = new THREE.Vector3(...position.direction).normalize();
+    const sunPosition = direction.clone().multiplyScalar(displayDistance);
+
+    // The Sun's real direction from Earth varies (it's genuinely
+    // wherever it currently is along Earth's orbit) and could easily
+    // fall outside the original fixed home camera framing — recompose
+    // the home view once, on load, so Earth AND the newly-placed Sun
+    // are both actually visible together, instead of leaving the Sun
+    // to be found only by manually rotating.
+    const framingBack = direction.clone().multiplyScalar(-14);
+    const homePosition = framingBack.add(new THREE.Vector3(0, 6, 0));
+    this.camera.position.copy(homePosition);
+    this.camera.lookAt(0, 0, 0);
+    this.controls.update();
+    this.homeCamera.position.copy(homePosition);
+
+    const geometry = new THREE.SphereGeometry(displayRadius, 32, 32);
+    const material = new THREE.MeshBasicMaterial({ color: 0xfff2c2 });
+    this.sunMesh = new THREE.Mesh(geometry, material);
+    this.sunMesh.position.copy(sunPosition);
+    this.scene.add(this.sunMesh);
+
+    const glowGeometry = new THREE.SphereGeometry(displayRadius * 1.3, 32, 32);
+    const glowMaterial = new THREE.ShaderMaterial({
+      uniforms: { uGlowColor: { value: new THREE.Color(0xffcc66) } },
+      vertexShader: ATMOSPHERE_VERTEX_SHADER,
+      fragmentShader: SUN_FRAGMENT_SHADER,
+      blending: THREE.AdditiveBlending,
+      side: THREE.BackSide,
+      transparent: true,
+    });
+    this.scene.add(new THREE.Mesh(glowGeometry, glowMaterial));
+  }
+
+  _initCelestialBodies() {
+    this.bodies = {};      // bodyKey -> { mesh, radiusUnits, minDistance, maxDistance, cameraPosition }
+    this.bodyMeta = {};    // bodyKey -> { display_name, radius_km, color_hex }
+
+    const select = document.getElementById('body-select');
+    fetch('/api/solar-system/bodies')
+      .then((r) => r.json())
+      .then((bodies) => {
+        this.bodyMeta = bodies;
+        for (const [key, meta] of Object.entries(bodies)) {
+          const opt = document.createElement('option');
+          opt.value = key;
+          opt.textContent = meta.display_name.toUpperCase();
+          select.appendChild(opt);
+        }
+      })
+      .catch((err) => console.error('Failed to load celestial body list:', err));
+
+    select.addEventListener('change', () => this._travelToBody(select.value));
+  }
+
+  _displayDistanceUnits(distanceKm) {
+    // Compressed (not-to-scale) placement distance so real interplanetary
+    // ranges stay navigable in this scene: log-scaled, clamped to a band
+    // just beyond Earth's own orbit-camera range.
+    const raw = 10 + 4 * Math.log10(distanceKm / 1e6);
+    return THREE.MathUtils.clamp(raw, 10, 26);
+  }
+
+  _getOrBuildBody(bodyKey, meta, position) {
+    if (this.bodies[bodyKey]) return this.bodies[bodyKey];
+
+    const radiusUnits = GLOBE_RADIUS * (meta.radius_km / R_EARTH_KM);
+    const displayDistance = this._displayDistanceUnits(position.distance_km);
+
+    const direction = new THREE.Vector3(...position.direction).normalize();
+    const bodyPosition = direction.clone().multiplyScalar(displayDistance);
+
+    // Real direction from THIS body toward the Sun right now (see
+    // data.solar_system.BodyPosition.sun_direction) — the shader's
+    // terminator is genuinely where the Sun currently falls on it.
+    const lightDir = new THREE.Vector3(...position.sun_direction).normalize();
+
+    const geometry = new THREE.SphereGeometry(radiusUnits, 64, 64);
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uBaseColor: { value: new THREE.Color(meta.color_hex) },
+        uLightDir: { value: lightDir },
+      },
+      vertexShader: ROCKY_BODY_VERTEX_SHADER,
+      fragmentShader: ROCKY_BODY_FRAGMENT_SHADER,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.copy(bodyPosition);
+    this.scene.add(mesh);
+
+    // A faint line from Earth toward the body along the real direction,
+    // so the "real direction" claim reads visually, not just as a number.
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), bodyPosition]);
+    const lineMaterial = new THREE.LineBasicMaterial({ color: PALETTE.amber, transparent: true, opacity: 0.25 });
+    this.scene.add(new THREE.Line(lineGeometry, lineMaterial));
+
+    const cameraOffset = direction.clone().multiplyScalar(-radiusUnits * 3.5);
+    cameraOffset.y += radiusUnits * 0.8;
+
+    const body = {
+      mesh,
+      radiusUnits,
+      minDistance: radiusUnits * 1.5,
+      maxDistance: radiusUnits * 10,
+      cameraPosition: bodyPosition.clone().add(cameraOffset),
+    };
+    this.bodies[bodyKey] = body;
+    return body;
+  }
+
+  _animateCamera(toPosition, toTarget, durationMs, onComplete) {
+    const fromPosition = this.camera.position.clone();
+    const fromTarget = this.controls.target.clone();
+    const startTime = performance.now();
+    const wasAutoRotate = this.controls.autoRotate;
+    this.controls.enabled = false;
+    this.controls.autoRotate = false;
+
+    const step = (now) => {
+      const t = Math.min(1, (now - startTime) / durationMs);
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+      this.camera.position.lerpVectors(fromPosition, toPosition, eased);
+      this.controls.target.lerpVectors(fromTarget, toTarget, eased);
+      this.controls.update();
+
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        this.controls.enabled = true;
+        this.controls.autoRotate = wasAutoRotate;
+        if (onComplete) onComplete();
+      }
+    };
+    requestAnimationFrame(step);
+  }
+
+  async _travelToBody(bodyKey) {
+    const statusEl = document.getElementById('celestial-status');
+
+    if (bodyKey === 'earth') {
+      statusEl.textContent = 'RETURNING TO EARTH…';
+      this._animateCamera(this.homeCamera.position, this.homeCamera.target, 2200, () => {
+        this.controls.minDistance = this.homeCamera.minDistance;
+        this.controls.maxDistance = this.homeCamera.maxDistance;
+        statusEl.textContent = 'EARTH — HOME VIEW';
+      });
+      return;
+    }
+
+    const meta = this.bodyMeta[bodyKey];
+    if (!meta) return;
+    statusEl.textContent = `CALCULATING TRAJECTORY TO ${meta.display_name.toUpperCase()}…`;
+
+    let position;
+    try {
+      const resp = await fetch(`/api/solar-system/${bodyKey}/position`);
+      if (!resp.ok) throw new Error(await extractErrorDetail(resp));
+      position = await resp.json();
+    } catch (err) {
+      statusEl.textContent = `HATA: ${err.message || err}`;
+      return;
+    }
+
+    const body = this._getOrBuildBody(bodyKey, meta, position);
+    const distanceAu = (position.distance_km / 1.496e8).toFixed(3);
+    statusEl.textContent = `${meta.display_name.toUpperCase()} — ${distanceAu} AU FROM EARTH (REAL-TIME DIRECTION)`;
+
+    this._animateCamera(body.cameraPosition, body.mesh.position, 2800, () => {
+      this.controls.minDistance = body.minDistance;
+      this.controls.maxDistance = body.maxDistance;
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Real small bodies (asteroids/comets) — a curated set of genuinely
+  // tracked real objects (see data.small_bodies), plotted at their
+  // current real direction/distance from Earth (SBDB orbital elements +
+  // two-body Kepler propagation server-side). Positions are current
+  // real-time snapshots, not tied to the time-slider/frame animation the
+  // TLE satellites use.
+  // -------------------------------------------------------------------
+
+  _initSmallBodies() {
+    this.smallBodyIndex = []; // parallel array: index i -> {key, state}
+
+    fetch('/api/small-bodies')
+      .then((r) => r.json())
+      .then((bodies) => Promise.all(
+        Object.entries(bodies).map(([key, meta]) =>
+          fetch(`/api/small-bodies/${key}/position`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((state) => ({ key, meta, state }))
+            .catch(() => null)
+        )
+      ))
+      .then((results) => this._buildSmallBodyMarkers(results.filter((r) => r && r.state)))
+      .catch((err) => console.error('Failed to load small bodies:', err));
+  }
+
+  _buildSmallBodyMarkers(entries) {
+    if (entries.length === 0) return;
+
+    const positions = new Float32Array(entries.length * 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    const material = new THREE.PointsMaterial({
+      size: 0.28,
+      map: makeCircleSprite(PALETTE.violet),
+      transparent: true,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+
+    entries.forEach(({ key, meta, state }, i) => {
+      const direction = new THREE.Vector3(...state.direction).normalize();
+      const displayDistance = this._displayDistanceUnits(state.distance_km);
+      const p = direction.multiplyScalar(displayDistance);
+      positions[i * 3] = p.x; positions[i * 3 + 1] = p.y; positions[i * 3 + 2] = p.z;
+      this.smallBodyIndex.push({ key, meta, state });
+    });
+    geometry.attributes.position.needsUpdate = true;
+
+    this.smallBodyPoints = new THREE.Points(geometry, material);
+    this.scene.add(this.smallBodyPoints);
+  }
+
+  _showSmallBodyInfo(entry) {
+    const { meta, state } = entry;
+    const distanceAu = (state.distance_km / 1.496e8).toFixed(3);
+    document.getElementById('info-panel').innerHTML = `
+      <table>
+        <tr><td>NAME</td><td>${meta.display_name}</td></tr>
+        <tr><td>TYPE</td><td class="value">${state.orbit_class_name.toUpperCase()}</td></tr>
+        <tr><td>DIST (EARTH)</td><td class="value">${distanceAu} AU</td></tr>
+        <tr><td>HAZARDOUS</td><td class="value">${state.is_potentially_hazardous ? 'YES' : 'NO'}</td></tr>
+      </table>
+      <div class="dim" style="margin-top:4px;">real orbital elements (JPL SBDB), current position</div>`;
   }
 }
 
