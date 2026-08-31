@@ -187,6 +187,7 @@ class Dashboard {
     this._initScene();
     this._buildEarth();
     this._initSun();
+    this._initMoons();
     this._buildSatellites();
     this._buildGroundTracks();
     this._initHud();
@@ -400,6 +401,21 @@ class Dashboard {
 
   _pick() {
     this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    // Moons are individual Mesh spheres (not a batched Points cloud like
+    // satellites/small bodies), so they need their own intersect pass.
+    const moonMeshes = (this.moonIndex || []).map((m) => m.mesh);
+    if (moonMeshes.length > 0) {
+      const moonHits = this.raycaster.intersectObjects(moonMeshes);
+      if (moonHits.length > 0) {
+        const entry = this.moonIndex.find((m) => m.mesh === moonHits[0].object);
+        if (entry) {
+          this._showMoonInfo(entry);
+          return;
+        }
+      }
+    }
+
     const pointObjects = Object.values(this.groups).map((g) => g.points);
     if (this.issPoint) pointObjects.push(this.issPoint);
     if (this.smallBodyPoints) pointObjects.push(this.smallBodyPoints);
@@ -807,7 +823,105 @@ class Dashboard {
       cameraPosition: bodyPosition.clone().add(cameraOffset),
     };
     this.bodies[bodyKey] = body;
+    this._attachMoonsForParent(bodyKey, bodyPosition);
     return body;
+  }
+
+  // -------------------------------------------------------------------
+  // Real moons (Mars: Phobos/Deimos; Earth: the Moon — Mercury/Venus
+  // genuinely have none, so they get none). Each moon is positioned
+  // relative to its OWN parent planet's real current position (see
+  // data.solar_system.BodyPosition.relative_to), not to Earth.
+  // -------------------------------------------------------------------
+
+  _initMoons() {
+    this.moonMeta = {};       // key -> meta
+    this.moonsByParent = {};  // parentKey -> [key, ...]
+    this.moonIndex = [];      // for picking: {key, meta, mesh, position}
+
+    fetch('/api/solar-system/moons')
+      .then((r) => r.json())
+      .then((moons) => {
+        this.moonMeta = moons;
+        for (const [key, meta] of Object.entries(moons)) {
+          (this.moonsByParent[meta.parent] = this.moonsByParent[meta.parent] || []).push(key);
+        }
+        // Earth is already in the scene at the origin from startup, so
+        // its moon can be attached immediately rather than waiting for
+        // a travel selection (Mars's moons attach lazily in
+        // _getOrBuildBody, once Mars itself is actually built).
+        this._attachMoonsForParent('earth', new THREE.Vector3(0, 0, 0));
+      })
+      .catch((err) => console.error('Failed to load moon list:', err));
+  }
+
+  _moonDisplayDistanceUnits(distanceKm, parentRadiusUnits) {
+    // A moon's TRUE orbital radius (e.g. Phobos ~9376 km from Mars)
+    // happens to already render reasonably at this scene's real-size
+    // scale factor for Mars, but for tiny/close cases the log-compressed
+    // formula (consistent with _displayDistanceUnits' approach) keeps
+    // it comfortably clear of the parent's own surface either way.
+    const raw = parentRadiusUnits + 2.5 + 3 * Math.log10(distanceKm / 1000);
+    return Math.max(parentRadiusUnits + 1.2, raw);
+  }
+
+  async _attachMoonsForParent(parentKey, parentPosition) {
+    const keys = this.moonsByParent && this.moonsByParent[parentKey];
+    if (!keys) return;
+
+    for (const key of keys) {
+      if (this.moonIndex.some((m) => m.key === key)) continue; // already attached
+      const meta = this.moonMeta[key];
+
+      let position;
+      try {
+        const resp = await fetch(`/api/solar-system/moons/${key}/position`);
+        if (!resp.ok) continue;
+        position = await resp.json();
+      } catch (err) {
+        console.error(`Failed to load position for moon '${key}':`, err);
+        continue;
+      }
+
+      const parentRadiusUnits = parentKey === 'earth' ? GLOBE_RADIUS : this.bodies[parentKey].radiusUnits;
+      // A floor on displayed radius: Phobos/Deimos's TRUE scale (a few
+      // km) would render as a sub-pixel dot at this scene's scale factor
+      // — bumped up to stay visibly a sphere, same spirit as the Sun's
+      // fixed compressed display radius.
+      const radiusUnits = Math.max(0.08, GLOBE_RADIUS * (meta.radius_km / R_EARTH_KM));
+      const displayDistance = this._moonDisplayDistanceUnits(position.distance_km, parentRadiusUnits);
+
+      const direction = new THREE.Vector3(...position.direction).normalize();
+      const meshPosition = parentPosition.clone().add(direction.multiplyScalar(displayDistance));
+
+      const lightDir = new THREE.Vector3(...position.sun_direction).normalize();
+      const geometry = new THREE.SphereGeometry(radiusUnits, 32, 32);
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          uBaseColor: { value: new THREE.Color(meta.color_hex) },
+          uLightDir: { value: lightDir },
+        },
+        vertexShader: ROCKY_BODY_VERTEX_SHADER,
+        fragmentShader: ROCKY_BODY_FRAGMENT_SHADER,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.copy(meshPosition);
+      this.scene.add(mesh);
+
+      this.moonIndex.push({ key, meta, mesh, position });
+    }
+  }
+
+  _showMoonInfo(entry) {
+    const { meta, position } = entry;
+    document.getElementById('info-panel').innerHTML = `
+      <table>
+        <tr><td>NAME</td><td>${meta.display_name}</td></tr>
+        <tr><td>ORBITS</td><td class="value">${meta.parent.toUpperCase()}</td></tr>
+        <tr><td>DIST (${meta.parent.toUpperCase()})</td><td class="value">${position.distance_km.toFixed(0)} km</td></tr>
+        <tr><td>RADIUS</td><td class="value">${meta.radius_km} km</td></tr>
+      </table>
+      <div class="dim" style="margin-top:4px;">real ephemeris (JPL Horizons), current position</div>`;
   }
 
   _animateCamera(toPosition, toTarget, durationMs, onComplete) {

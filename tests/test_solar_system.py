@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from data.solar_system import BODIES, BodyPosition, SolarSystemClient
+from data.solar_system import BODIES, MOONS, BodyPosition, SolarSystemClient
 
 
 def _fake_position(body="mercury"):
@@ -80,3 +80,56 @@ def test_fetch_position_live_sun():
     pos = client.fetch_position("sun", force=True)
     distance_au = pos.distance_km / 1.496e8
     assert 0.95 < distance_au < 1.05  # Earth-Sun distance is ~1 AU by definition
+
+
+@pytest.mark.network
+def test_fetch_position_live_venus_and_mars():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    venus = client.fetch_position("venus", force=True)
+    venus_au = venus.distance_km / 1.496e8
+    assert 0.25 < venus_au < 1.75  # Venus's real Earth-distance range
+
+    mars = client.fetch_position("mars", force=True)
+    mars_au = mars.distance_km / 1.496e8
+    assert 0.35 < mars_au < 2.7  # Mars's real Earth-distance range
+
+    for pos in (venus, mars):
+        assert sum(d * d for d in pos.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert sum(d * d for d in pos.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert pos.relative_to == "earth"
+
+
+def test_fetch_moon_position_rejects_unknown_moon(tmp_path):
+    client = SolarSystemClient(cache_dir=tmp_path)
+    with pytest.raises(ValueError, match="Unknown moon"):
+        client.fetch_moon_position("titan")
+
+
+@pytest.mark.network
+def test_fetch_moon_position_live_mars_moons():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    phobos = client.fetch_moon_position("phobos", force=True)
+    assert phobos.relative_to == "mars"
+    # Phobos orbits Mars at a real semi-major axis of ~9376 km.
+    assert 9000 < phobos.distance_km < 9800
+
+    deimos = client.fetch_moon_position("deimos", force=True)
+    assert deimos.relative_to == "mars"
+    # Deimos orbits Mars at a real semi-major axis of ~23463 km.
+    assert 22800 < deimos.distance_km < 24200
+
+    for pos in (phobos, deimos):
+        assert sum(d * d for d in pos.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert sum(d * d for d in pos.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.network
+def test_fetch_moon_position_live_earth_moon():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+    moon = client.fetch_moon_position("moon", force=True)
+    assert moon.relative_to == "earth"
+    # The Moon's real distance from Earth varies ~356,500-406,700 km.
+    assert 350000 < moon.distance_km < 410000
+    assert sum(d * d for d in moon.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)

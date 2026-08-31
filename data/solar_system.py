@@ -58,6 +58,48 @@ BODIES: dict[str, dict] = {
         "radius_km": 2439.7,
         "color_hex": 0x8a8175,
     },
+    "venus": {
+        "display_name": "Venus",
+        "radius_km": 6051.8,
+        # Venus's real appearance: a near-featureless, bright pale
+        # yellow-white sulfuric-acid cloud deck (true color, not the
+        # false-color radar-mapped surface images most people picture).
+        "color_hex": 0xd9c48a,
+    },
+    "mars": {
+        "display_name": "Mars",
+        "radius_km": 3389.5,
+        "color_hex": 0xb1552f,
+    },
+}
+
+# Mars's two real natural satellites (Mercury and Venus have none — not
+# an omission, a fact: this project doesn't invent moons that don't
+# exist). Unlike BODIES above (positioned relative to Earth), a moon's
+# meaningful position is relative to its OWN parent planet — see
+# fetch_moon_position()/relative_to on BodyPosition.
+MOONS: dict[str, dict] = {
+    "phobos": {
+        "display_name": "Phobos",
+        "parent": "mars",
+        "horizons_command": "401",  # not in data.horizons.BODY_CODES (planets/Sun/Moon only) — passed straight through as a raw Horizons body code
+        "radius_km": 11.08,
+        "color_hex": 0x8a7a68,
+    },
+    "deimos": {
+        "display_name": "Deimos",
+        "parent": "mars",
+        "horizons_command": "402",
+        "radius_km": 6.27,
+        "color_hex": 0x9c8f7c,
+    },
+    "moon": {
+        "display_name": "Moon",
+        "parent": "earth",
+        "horizons_command": "moon",  # matches data.horizons.BODY_CODES directly
+        "radius_km": 1737.4,
+        "color_hex": 0xb8b3aa,
+    },
 }
 
 
@@ -68,7 +110,7 @@ class BodyPosition:
     body: str
     fetched_at: str          # ISO 8601 UTC — when this was fetched from Horizons
     jd_tdb: float             # Julian date (TDB) of the Horizons sample used
-    r_km: tuple[float, float, float]   # Earth-centered Cartesian position, km
+    r_km: tuple[float, float, float]   # Cartesian position, km, centered on `relative_to`
     distance_km: float
     direction: tuple[float, float, float]  # unit vector, same frame as r_km
     # Real direction FROM this body TOWARD the Sun (unit vector, same
@@ -76,6 +118,11 @@ class BodyPosition:
     # rather than an arbitrary fixed light direction. Meaningless for the
     # Sun itself, which reports (0.0, 0.0, 0.0).
     sun_direction: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # What r_km/direction/distance_km are centered on: "earth" for every
+    # BODIES entry (planets, Sun); a parent planet's key (e.g. "mars")
+    # for a MOONS entry, since a moon's meaningful position is relative
+    # to what it actually orbits, not to Earth.
+    relative_to: str = "earth"
 
 
 class SolarSystemClient(ResilientFetcher[BodyPosition]):
@@ -106,6 +153,17 @@ class SolarSystemClient(ResilientFetcher[BodyPosition]):
             raise ValueError(f"Unknown body '{body}'. Supported: {list(BODIES)}")
         return self.fetch(body, force=force)
 
+    def fetch_moon_position(self, moon: str, force: bool = False) -> BodyPosition:
+        """
+        Real-time position of `moon` (a key in MOONS) relative to its own
+        parent planet (see BodyPosition.relative_to) — NOT relative to
+        Earth, since that's what actually places it correctly next to
+        its planet in the scene.
+        """
+        if moon not in MOONS:
+            raise ValueError(f"Unknown moon '{moon}'. Supported: {list(MOONS)}")
+        return self.fetch(moon, force=force)
+
     # --- ResilientFetcher hooks -------------------------------------------------
 
     def _fetch_live(self, key: str) -> BodyPosition:
@@ -116,6 +174,39 @@ class SolarSystemClient(ResilientFetcher[BodyPosition]):
         end_str = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
 
         client = HorizonsClient(timeout=self.timeout)
+
+        if key in MOONS:
+            moon_meta = MOONS[key]
+            parent_key = moon_meta["parent"]
+            parent_code = BODY_CODES[parent_key]
+            command = moon_meta["horizons_command"]
+
+            samples = client.fetch_vectors(command, start_str, end_str, step_size="1h", center=f"500@{parent_code}")
+            if not samples:
+                raise RuntimeError(f"Horizons returned no samples for moon '{key}'")
+            sample = samples[0]
+            x, y, z = sample.r_km
+            distance_km = math.sqrt(x * x + y * y + z * z)
+            direction = (x / distance_km, y / distance_km, z / distance_km)
+
+            # `command` may be a raw numeric Horizons code ("401") or a
+            # mnemonic ("moon") that only fetch_vectors' own COMMAND
+            # parameter auto-translates via BODY_CODES — CENTER needs
+            # the resolved numeric code either way.
+            center_code = BODY_CODES.get(command.lower(), command)
+            sun_direction = (0.0, 0.0, 0.0)
+            sun_samples = client.fetch_vectors("sun", start_str, end_str, step_size="1h", center=f"500@{center_code}")
+            if sun_samples:
+                sx, sy, sz = sun_samples[0].r_km
+                sun_dist = math.sqrt(sx * sx + sy * sy + sz * sz)
+                sun_direction = (sx / sun_dist, sy / sun_dist, sz / sun_dist)
+
+            return BodyPosition(
+                body=key, fetched_at=now.isoformat(), jd_tdb=sample.jd_tdb,
+                r_km=(x, y, z), distance_km=distance_km, direction=direction,
+                sun_direction=sun_direction, relative_to=parent_key,
+            )
+
         samples = client.fetch_vectors(key, start_str, end_str, step_size="1h", center="500@399")
         if not samples:
             raise RuntimeError(f"Horizons returned no samples for '{key}'")
@@ -146,6 +237,7 @@ class SolarSystemClient(ResilientFetcher[BodyPosition]):
             distance_km=distance_km,
             direction=direction,
             sun_direction=sun_direction,
+            relative_to="earth",
         )
 
     def _cache_path(self, key: str) -> Path:
@@ -169,6 +261,7 @@ class SolarSystemClient(ResilientFetcher[BodyPosition]):
             body=rec["body"], fetched_at=rec["fetched_at"], jd_tdb=rec["jd_tdb"],
             r_km=tuple(rec["r_km"]), distance_km=rec["distance_km"], direction=tuple(rec["direction"]),
             sun_direction=tuple(rec.get("sun_direction", (0.0, 0.0, 0.0))),
+            relative_to=rec.get("relative_to", "earth"),
         )
 
     def _save_cache(self, key: str, data: BodyPosition) -> None:

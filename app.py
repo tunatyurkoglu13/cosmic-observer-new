@@ -41,7 +41,7 @@ from data.nasa_cneos import CNEOSClient
 from data.neows import NeoWsClient
 from data.sbdb import SBDBClient
 from data.small_bodies import CURATED_BODIES as SMALL_BODIES, SmallBodyTracker
-from data.solar_system import BODIES as SOLAR_SYSTEM_BODIES, SolarSystemClient
+from data.solar_system import BODIES as SOLAR_SYSTEM_BODIES, MOONS as SOLAR_SYSTEM_MOONS, SolarSystemClient
 from data.space_weather import fetch_current_snapshot
 from reports.launch_analysis import generate_launch_analysis
 from reports.risk_report import generate_risk_report
@@ -402,6 +402,25 @@ def solar_system_position(body: str):
     client = SolarSystemClient()
     try:
         position = client.fetch_position(body)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except requests.RequestException:
+        raise HTTPException(503, "JPL Horizons is currently unreachable — external service outage, try again shortly.")
+    return position
+
+
+@app.get("/api/solar-system/moons")
+def solar_system_moons():
+    """Static metadata (real radius, display color, parent planet) for Mars's/Earth's real moons."""
+    return SOLAR_SYSTEM_MOONS
+
+
+@app.get("/api/solar-system/moons/{key}/position")
+def solar_system_moon_position(key: str):
+    """Real-time position of `key` relative to its own parent planet (not Earth) — see data.solar_system."""
+    client = SolarSystemClient()
+    try:
+        position = client.fetch_moon_position(key)
     except ValueError as e:
         raise HTTPException(404, str(e))
     except requests.RequestException:
