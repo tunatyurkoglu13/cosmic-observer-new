@@ -71,6 +71,14 @@ BODIES: dict[str, dict] = {
         "radius_km": 3389.5,
         "color_hex": 0xb1552f,
     },
+    "jupiter": {
+        "display_name": "Jupiter",
+        "radius_km": 69911.0,
+        # Jupiter's real true-color appearance: pale cream/tan cloud
+        # bands (the tactical shader's own scanline pattern happens to
+        # double as a fitting stylization of its actual banded structure).
+        "color_hex": 0xc9a876,
+    },
 }
 
 # Mars's two real natural satellites (Mercury and Venus have none — not
@@ -99,6 +107,39 @@ MOONS: dict[str, dict] = {
         "horizons_command": "moon",  # matches data.horizons.BODY_CODES directly
         "radius_km": 1737.4,
         "color_hex": 0xb8b3aa,
+    },
+    # Jupiter's four real Galilean moons — by far its most significant
+    # satellites (of Jupiter's 90+ known moons, these are the only ones
+    # large enough to be individually meaningful at this project's scale
+    # and the only ones worth naming here; not claiming Jupiter has only
+    # four moons, just that these are the ones this dashboard renders).
+    "io": {
+        "display_name": "Io",
+        "parent": "jupiter",
+        "horizons_command": "501",
+        "radius_km": 1821.6,
+        "color_hex": 0xd9c36b,  # sulfur-yellow, Io's real, famously vivid surface
+    },
+    "europa": {
+        "display_name": "Europa",
+        "parent": "jupiter",
+        "horizons_command": "502",
+        "radius_km": 1560.8,
+        "color_hex": 0xd8c9ab,  # icy pale tan
+    },
+    "ganymede": {
+        "display_name": "Ganymede",
+        "parent": "jupiter",
+        "horizons_command": "503",
+        "radius_km": 2634.1,  # the solar system's largest moon, bigger than Mercury
+        "color_hex": 0x8f8577,
+    },
+    "callisto": {
+        "display_name": "Callisto",
+        "parent": "jupiter",
+        "horizons_command": "504",
+        "radius_km": 2410.3,
+        "color_hex": 0x6f6459,  # Callisto is the darkest, most heavily cratered Galilean moon
     },
 }
 

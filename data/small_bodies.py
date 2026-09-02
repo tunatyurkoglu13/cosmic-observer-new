@@ -59,6 +59,14 @@ CURATED_BODIES: dict[str, dict] = {
     "apophis": {"designation": "99942", "display_name": "99942 Apophis", "color_hex": 0x7a746a},
     "halley": {"designation": "1P", "display_name": "1P/Halley", "color_hex": 0xbfe0ff},
     "ceres": {"designation": "1", "display_name": "1 Ceres", "color_hex": 0x8f8b82},
+    # Real Jupiter Trojans — asteroids sharing Jupiter's orbit, clustered
+    # near its L4/L5 Lagrange points (~60 deg ahead of/behind Jupiter),
+    # not just objects that happen to be nearby. Confirmed real
+    # (orbit_class "Jupiter Trojan"/TJN) against live SBDB during
+    # development. Hektor is the largest known Trojan; Achilles was the
+    # first ever discovered (1906).
+    "hektor": {"designation": "624", "display_name": "624 Hektor", "color_hex": 0x8a7d6e},
+    "achilles": {"designation": "588", "display_name": "588 Achilles", "color_hex": 0x9a8d7d},
 }
 
 

@@ -18,6 +18,7 @@
 
   #hud {
     position: fixed; inset: 0; pointer-events: none;
+    z-index: 10;
     display: grid;
     grid-template-columns: 320px 1fr 300px;
     grid-template-rows: auto 1fr auto;
@@ -93,6 +94,27 @@
   .co-btn:hover { background: rgba(0,255,255,0.2); }
   .co-btn.active { background: var(--co-cyan); color: #000; }
 
+  #body-labels { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  .body-label {
+    position: absolute; left: 0; top: 0;
+    transform: translate(-50%, -22px);
+    font-family: var(--co-font); font-size: 10px; letter-spacing: 0.08em;
+    white-space: nowrap; text-transform: uppercase;
+    text-shadow: 0 0 6px currentColor, 0 0 2px rgba(0,0,0,0.9);
+    opacity: 0.75;
+  }
+  .body-label::after {
+    content: ''; position: absolute; left: 50%; top: 100%;
+    width: 1px; height: 10px; background: currentColor; opacity: 0.5;
+  }
+  .body-label.focused {
+    opacity: 1; font-weight: 700;
+    padding: 1px 5px; transform: translate(-50%, -30px);
+    border: 1px solid currentColor; border-radius: 2px;
+    background: rgba(0, 20, 24, 0.55);
+  }
+  .body-label.focused::before { content: '▸ '; }
+
   #loading {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     background: var(--co-background); color: var(--co-cyan); font-size: 14px;
@@ -107,6 +129,7 @@
 <div class="co-crt-flicker"></div>
 
 <div id="scene-container"></div>
+<div id="body-labels"></div>
 
 <div id="hud">
   <div id="left-sidebar">

@@ -133,3 +133,40 @@ def test_fetch_moon_position_live_earth_moon():
     # The Moon's real distance from Earth varies ~356,500-406,700 km.
     assert 350000 < moon.distance_km < 410000
     assert sum(d * d for d in moon.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.network
+def test_fetch_position_live_jupiter():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+    jupiter = client.fetch_position("jupiter", force=True)
+    jupiter_au = jupiter.distance_km / 1.496e8
+    assert 3.9 < jupiter_au < 6.5  # Jupiter's real Earth-distance range
+    assert sum(d * d for d in jupiter.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+    assert sum(d * d for d in jupiter.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+    assert jupiter.relative_to == "earth"
+
+
+@pytest.mark.network
+def test_fetch_moon_position_live_galilean_moons():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    # Real semi-major axes (km): Io 421700, Europa 670900, Ganymede
+    # 1070400, Callisto 1882700 — checked with generous tolerance since
+    # actual distance varies with orbital position.
+    expected_ranges = {
+        "io": (390000, 450000),
+        "europa": (620000, 720000),
+        "ganymede": (1000000, 1140000),
+        "callisto": (1750000, 2000000),
+    }
+    for key, (lo, hi) in expected_ranges.items():
+        pos = client.fetch_moon_position(key, force=True)
+        assert pos.relative_to == "jupiter"
+        assert lo < pos.distance_km < hi, f"{key}: {pos.distance_km} not in [{lo}, {hi}]"
+        assert sum(d * d for d in pos.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert sum(d * d for d in pos.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+
+    # Real ordering: Io closest, Callisto farthest.
+    io_dist = client.fetch_moon_position("io").distance_km
+    callisto_dist = client.fetch_moon_position("callisto").distance_km
+    assert io_dist < callisto_dist

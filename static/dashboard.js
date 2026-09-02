@@ -4,6 +4,10 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { feature as topoFeature } from 'topojson-client';
 
 // Real 110m-resolution world coastlines (Natural Earth data via the
@@ -17,6 +21,7 @@ const LAND_TOPOLOGY_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.
 
 const R_EARTH_KM = 6378.137;
 const GLOBE_RADIUS = 4.0; // scene units representing R_EARTH_KM
+const MAX_BODY_RADIUS_UNITS = 7.5; // see _getOrBuildBody's Jupiter-sizing note
 
 const PALETTE = {
   cyan: 0x00ffff,
@@ -92,89 +97,103 @@ void main() {
 }
 `;
 
-// Procedural cratered-rock look for non-Earth bodies (Mercury first) —
-// no photographic texture (avoids the exact UV/orientation pitfalls this
-// project hit with Earth's original texture, see dashboard.js history),
-// just a muted, realistic base color modulated by fractal value noise
-// sampled in OBJECT space (vPosition), so the crater pattern rotates
-// rigidly with the sphere rather than swimming with the camera.
+// Tactical-hologram look for non-Earth bodies (Mercury/Venus/Mars,
+// moons): no photographic texture (this project deliberately never
+// samples a diffuse image — see dashboard.js history around Earth's
+// original texture UV problems) — instead a dark radar-globe base with
+// faint object-space "topographic" scanlines plus a Fresnel rim glow in
+// the interface's own cyan, so every body reads as a scanned HUD
+// projection rather than a photoreal render. uLightDir (the body's real,
+// per-body current direction toward the Sun — see
+// data.solar_system.BodyPosition.sun_direction) is kept as a subtle
+// secondary brightness cue so the underlying "real astronomy" data is
+// still legible, just subordinate to the tactical aesthetic.
 const ROCKY_BODY_VERTEX_SHADER = `
 varying vec3 vPosition;
 varying vec3 vNormalWorld;
+varying vec3 vWorldPosition;
 void main() {
   vPosition = position;
   vNormalWorld = normalize(mat3(modelMatrix) * normal);
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  vWorldPosition = worldPos.xyz;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
 const ROCKY_BODY_FRAGMENT_SHADER = `
 uniform vec3 uBaseColor;
+uniform vec3 uRimColor;
 uniform vec3 uLightDir;
 varying vec3 vPosition;
 varying vec3 vNormalWorld;
-
-float hash(vec3 p) {
-  p = fract(p * vec3(443.897, 441.423, 437.195));
-  p += dot(p, p.yzx + 19.19);
-  return fract((p.x + p.y) * p.z);
-}
-
-float valueNoise(vec3 p) {
-  vec3 i = floor(p);
-  vec3 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(
-    mix(mix(hash(i + vec3(0.0,0.0,0.0)), hash(i + vec3(1.0,0.0,0.0)), f.x),
-        mix(hash(i + vec3(0.0,1.0,0.0)), hash(i + vec3(1.0,1.0,0.0)), f.x), f.y),
-    mix(mix(hash(i + vec3(0.0,0.0,1.0)), hash(i + vec3(1.0,0.0,1.0)), f.x),
-        mix(hash(i + vec3(0.0,1.0,1.0)), hash(i + vec3(1.0,1.0,1.0)), f.x), f.y),
-    f.z);
-}
-
-float fbm(vec3 p) {
-  float v = 0.0;
-  float amp = 0.5;
-  for (int i = 0; i < 5; i++) {
-    v += amp * valueNoise(p);
-    p *= 2.02;
-    amp *= 0.5;
-  }
-  return v;
-}
+varying vec3 vWorldPosition;
 
 void main() {
-  float n = fbm(vPosition * 2.4);
-  float craterMask = smoothstep(0.35, 0.68, n);
-  vec3 darkColor = uBaseColor * 0.7;
-  vec3 lightColor = uBaseColor * 1.35;
-  vec3 albedo = mix(darkColor, lightColor, craterMask);
+  vec3 normal = normalize(vNormalWorld);
+  vec3 viewDir = normalize(cameraPosition - vWorldPosition);
 
-  // Real terminator: uLightDir is the body's own true current direction
-  // toward the Sun (data.solar_system.BodyPosition.sun_direction), not
-  // an arbitrary fixed vector — the lit/unlit split you see actually
-  // matches where the Sun is right now, from that body.
-  float lambert = max(dot(normalize(vNormalWorld), normalize(uLightDir)), 0.0);
-  // Ambient floor kept fairly high (0.42) so the night side stays
-  // readable in a dashboard rather than going physically-accurate pitch
-  // black — a deliberate visibility choice, not a claim of literal
-  // night-side brightness.
-  float ambient = 0.42;
-  vec3 shaded = albedo * (ambient + (1.0 - ambient) * lambert) * 1.25;
+  // Fresnel rim: near-grazing angles (silhouette edge) glow brightest —
+  // the literal "kenarlari parlasin" ask. Higher exponent keeps this a
+  // thin bright edge rather than a wide halo eating the whole disk once
+  // the bloom pass spreads it further.
+  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.4);
 
-  gl_FragColor = vec4(min(shaded, vec3(1.0)), 1.0);
+  // Topographic scanlines: horizontal contour bands in object space
+  // (latitude-like), read as a radar/wireframe survey rather than a
+  // literal surface photo.
+  float lat = normalize(vPosition).y;
+  float bands = sin(lat * 55.0) * 0.5 + 0.5;
+  float scan = smoothstep(0.85, 1.0, bands);
+
+  // Real per-body Sun direction, kept as a gentle secondary shading cue
+  // (not the dominant read anymore — the tactical rim/scanline look is).
+  float lambert = max(dot(normal, normalize(uLightDir)), 0.0);
+  float ambient = 0.45;
+
+  vec3 darkBase = vec3(0.015, 0.03, 0.045);
+  vec3 topoColor = uBaseColor * 0.55;
+  vec3 base = mix(darkBase, topoColor, scan * 0.4) * (ambient + (1.0 - ambient) * lambert);
+
+  vec3 rimGlow = uRimColor * fresnel * 1.3;
+
+  gl_FragColor = vec4(base + rimGlow, 1.0);
 }
 `;
 
-// Unlit, warm, additively-glowing Sun — same rim-glow technique as
-// ATMOSPHERE_*_SHADER (a real light source has no "far side" to shade).
+// Sun: a pulsing procedural "energy source" core (not a flat lit ball —
+// a real light source has no far side to shade) plus the same
+// additive Fresnel corona shell technique as ATMOSPHERE_*_SHADER,
+// tuned warm so it reads as the system's power source, not a
+// photographic star.
 const SUN_FRAGMENT_SHADER = `
 uniform vec3 uGlowColor;
+uniform float uTime;
 varying vec3 vNormal;
 void main() {
   float rim = 1.0 - max(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 0.0);
   vec3 core = uGlowColor * 1.4;
   gl_FragColor = vec4(mix(core, uGlowColor, rim), 1.0);
+}
+`;
+
+const SUN_CORE_VERTEX_SHADER = `
+varying vec3 vNormal;
+void main() {
+  vNormal = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const SUN_CORE_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+uniform float uTime;
+varying vec3 vNormal;
+void main() {
+  float pulse = 0.88 + 0.12 * sin(uTime * 1.7);
+  float rim = 1.0 - max(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 0.0);
+  vec3 core = uColor * (1.25 + rim * 0.5) * pulse;
+  gl_FragColor = vec4(core, 1.0);
 }
 `;
 
@@ -185,6 +204,7 @@ class Dashboard {
     this.playing = false;
 
     this._initScene();
+    this._initLabels();
     this._buildEarth();
     this._initSun();
     this._initMoons();
@@ -216,7 +236,7 @@ class Dashboard {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.minDistance = 6;
-    this.controls.maxDistance = 40;
+    this.controls.maxDistance = 70; // wide enough to manually zoom out to any pre-built planet (see _displayDistanceUnits)
     // Slow idle spin so the globe reads as a living 3D world (continents
     // visibly turning) rather than a static image; OrbitControls pauses
     // this automatically while the user is dragging and resumes after.
@@ -231,11 +251,185 @@ class Dashboard {
       maxDistance: this.controls.maxDistance,
     };
 
+    // Very low-level ambient fill so no shaded body's dark side goes to
+    // literal black (the "hacimlerini belli edecek hafif ortam ışığı"
+    // ask) — the actual visible ambient floor lives in
+    // ROCKY_BODY_FRAGMENT_SHADER's own `ambient` term (a THREE.Light
+    // doesn't affect a custom ShaderMaterial on its own), this scene
+    // light is here for completeness/any future standard-material mesh.
+    this.scene.add(new THREE.AmbientLight(0x0a1a2a, 1.0));
+
+    this._buildStarfield();
+    this._buildReferenceGrid();
+    this._initPostProcessing();
+
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.composer.setSize(window.innerWidth, window.innerHeight);
+      this.bloomPass.setSize(window.innerWidth, window.innerHeight);
     });
+  }
+
+  _initPostProcessing() {
+    // A restrained "CRT glow" bloom — cyan rim-light/wireframe/HUD text
+    // reads like it's glowing on an old tactical display, without
+    // blowing out the whole scene. Threshold kept low so even
+    // moderately bright cyan lines catch it (their fresnel rim term
+    // deliberately pushes color values past 1.0 for exactly this).
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      0.32,  // strength
+      0.28,  // radius
+      0.4,   // threshold
+    );
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
+  }
+
+  _buildStarfield() {
+    // Subtle, UI-colored star field for depth — not a literal black
+    // void behind the scene. Positioned on a large shell well outside
+    // any interactive content (planets/asteroids top out well under 30
+    // scene units — see _displayDistanceUnits).
+    const starCount = 2200;
+    const positions = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount; i++) {
+      const r = 220 + Math.random() * 180;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = r * Math.cos(phi);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.PointsMaterial({
+      size: 0.9,
+      map: makeCircleSprite(0x88bbdd),
+      color: 0x88bbdd,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    this.scene.add(new THREE.Points(geometry, material));
+    this._buildDeepStarfield();
+  }
+
+  _buildDeepStarfield() {
+    // A second, much farther and sparser star layer — extra depth/
+    // parallax richness beyond the reference-grid shell (radius 55) and
+    // the primary starfield (radius 220-400), without altering the
+    // restrained interface palette: same cool cyan-blue family, just a
+    // few individually dimmer/smaller points, plus an occasional faint
+    // warm-white one for subtle variation (real starfields aren't
+    // perfectly monochrome) — never bright or saturated enough to read
+    // as decoration competing with the tactical HUD elements.
+    const starCount = 1400;
+    const positions = new Float32Array(starCount * 3);
+    const colors = new Float32Array(starCount * 3);
+    const coolColor = new THREE.Color(0x6fa0c9);
+    const warmColor = new THREE.Color(0xd9d0b8);
+    for (let i = 0; i < starCount; i++) {
+      const r = 500 + Math.random() * 400;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = r * Math.cos(phi);
+
+      const c = Math.random() < 0.12 ? warmColor : coolColor;
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const material = new THREE.PointsMaterial({
+      size: 0.5,
+      map: makeCircleSprite(0xffffff),
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.32,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    this.scene.add(new THREE.Points(geometry, material));
+  }
+
+  _buildReferenceGrid() {
+    // A large, very faint spherical wireframe — a "radar globe" backdrop
+    // that reads as scientific instrumentation rather than empty space,
+    // without competing with the actual tracked objects in front of it.
+    const gridGeometry = new THREE.SphereGeometry(55, 24, 16);
+    const gridMaterial = new THREE.LineBasicMaterial({
+      color: PALETTE.cyan, transparent: true, opacity: 0.05,
+    });
+    this.scene.add(new THREE.LineSegments(new THREE.WireframeGeometry(gridGeometry), gridMaterial));
+  }
+
+  _addWireframeOverlay(mesh, radiusUnits) {
+    // A separate, deliberately low-poly sphere (independent of the
+    // shaded mesh's higher-detail geometry, which would otherwise
+    // wireframe into an unreadable dense mesh) for a clean lat/lon HUD
+    // wireframe — the literal "tel kafes" ask — parented to the body so
+    // it inherits its position/rotation automatically.
+    const wireGeometry = new THREE.SphereGeometry(radiusUnits * 1.015, 16, 12);
+    const wireMaterial = new THREE.LineBasicMaterial({
+      color: PALETTE.cyan, transparent: true, opacity: 0.22,
+    });
+    mesh.add(new THREE.LineSegments(new THREE.WireframeGeometry(wireGeometry), wireMaterial));
+  }
+
+  // -------------------------------------------------------------------
+  // Body labels — a DOM overlay (not 3D sprites/CSS2DRenderer, kept
+  // deliberately simple) naming every real body/moon in the scene, so a
+  // planet you haven't traveled to yet — but which was built up front by
+  // _initCelestialBodies and is now just a small glowing dot in the
+  // background from wherever you're currently looking — is still
+  // identifiable, and so the currently-focused body is unambiguous. Only
+  // "real sphere" bodies get a permanent label (planets/moons/Sun/Earth);
+  // the small asteroid/comet markers stay click-to-info only, so the
+  // scene doesn't get cluttered with a dozen permanent tags.
+  // -------------------------------------------------------------------
+
+  _initLabels() {
+    this.labelLayer = document.getElementById('body-labels');
+    this.labels = []; // { key, mesh, el }
+    this.focusedBodyKey = 'earth';
+  }
+
+  _addLabel(key, mesh, text, colorHex) {
+    const el = document.createElement('div');
+    el.className = 'body-label';
+    el.textContent = text;
+    el.style.color = '#' + new THREE.Color(colorHex).getHexString();
+    this.labelLayer.appendChild(el);
+    this.labels.push({ key, mesh, el });
+  }
+
+  _updateLabels() {
+    if (!this.labels) return;
+    const v = new THREE.Vector3();
+    for (const label of this.labels) {
+      label.mesh.getWorldPosition(v);
+      v.project(this.camera);
+
+      const behindCamera = v.z > 1;
+      if (behindCamera) {
+        label.el.style.display = 'none';
+        continue;
+      }
+      label.el.style.display = 'block';
+      const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+      const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+      label.el.style.left = `${x}px`;
+      label.el.style.top = `${y}px`;
+      label.el.classList.toggle('focused', label.key === this.focusedBodyKey);
+    }
   }
 
   _buildEarth() {
@@ -251,6 +445,8 @@ class Dashboard {
     const material = new THREE.MeshBasicMaterial({ color: 0x03060c });
     this.earth = new THREE.Mesh(geometry, material);
     this.scene.add(this.earth);
+    this._addWireframeOverlay(this.earth, GLOBE_RADIUS);
+    this._addLabel('earth', this.earth, 'EARTH', PALETTE.cyan);
 
     const atmoGeometry = new THREE.SphereGeometry(GLOBE_RADIUS * 1.08, 64, 64);
     const atmoMaterial = new THREE.ShaderMaterial({
@@ -499,7 +695,12 @@ class Dashboard {
       }
     }
 
-    this.renderer.render(this.scene, this.camera);
+    if (this.sunCoreMaterial) {
+      this.sunCoreMaterial.uniforms.uTime.value = performance.now() / 1000;
+    }
+
+    this._updateLabels();
+    this.composer.render();
   }
 
   // -------------------------------------------------------------------
@@ -733,10 +934,21 @@ class Dashboard {
     this.homeCamera.position.copy(homePosition);
 
     const geometry = new THREE.SphereGeometry(displayRadius, 32, 32);
-    const material = new THREE.MeshBasicMaterial({ color: 0xfff2c2 });
-    this.sunMesh = new THREE.Mesh(geometry, material);
+    // A pulsing procedural core (not a flat lit ball) reads as a
+    // tactical energy source rather than a photographic star; uTime is
+    // advanced each frame in _animate().
+    this.sunCoreMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(0xfff2c2) },
+        uTime: { value: 0 },
+      },
+      vertexShader: SUN_CORE_VERTEX_SHADER,
+      fragmentShader: SUN_CORE_FRAGMENT_SHADER,
+    });
+    this.sunMesh = new THREE.Mesh(geometry, this.sunCoreMaterial);
     this.sunMesh.position.copy(sunPosition);
     this.scene.add(this.sunMesh);
+    this._addLabel('sun', this.sunMesh, 'SUN', 0xfff2c2);
 
     const glowGeometry = new THREE.SphereGeometry(displayRadius * 1.3, 32, 32);
     const glowMaterial = new THREE.ShaderMaterial({
@@ -748,6 +960,33 @@ class Dashboard {
       transparent: true,
     });
     this.scene.add(new THREE.Mesh(glowGeometry, glowMaterial));
+
+    // A procedural, no-external-texture stand-in for a lens-flare halo
+    // (this project deliberately avoids photographic/binary texture
+    // assets — see ROCKY_BODY_*_SHADER's own docstring): two soft
+    // additive billboards at the Sun's own position, different sizes/
+    // opacities, which combined with the bloom pass reads as a warm
+    // optical glint rather than a flat sprite. Not a true screen-space
+    // multi-ghost flare (that needs per-frame projection math) — a
+    // reasonable, honest simplification for this pass.
+    const haloSprites = [
+      { scale: displayRadius * 5.5, opacity: 0.22 },
+      { scale: displayRadius * 9.0, opacity: 0.1 },
+    ];
+    this.sunHaloSprites = haloSprites.map(({ scale, opacity }) => {
+      const spriteMaterial = new THREE.SpriteMaterial({
+        map: makeCircleSprite(0xffe6a8),
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const sprite = new THREE.Sprite(spriteMaterial);
+      sprite.scale.set(scale, scale, 1);
+      sprite.position.copy(sunPosition);
+      this.scene.add(sprite);
+      return sprite;
+    });
   }
 
   _initCelestialBodies() {
@@ -757,7 +996,15 @@ class Dashboard {
     const select = document.getElementById('body-select');
     fetch('/api/solar-system/bodies')
       .then((r) => r.json())
-      .then((bodies) => {
+      .then(async (allBodies) => {
+        // The Sun is handled entirely separately (_initSun/_buildSun —
+        // its own pulsing-core shader, halo sprites, and the initial
+        // home-camera framing) even though data.solar_system.BODIES
+        // includes it alongside the planets for API uniformity. Building
+        // it again here through the generic rocky-planet path would
+        // create a second, different-looking, differently-positioned
+        // "Sun" object and a redundant/nonsensical dropdown entry.
+        const { sun: _sun, ...bodies } = allBodies;
         this.bodyMeta = bodies;
         for (const [key, meta] of Object.entries(bodies)) {
           const opt = document.createElement('option');
@@ -765,25 +1012,64 @@ class Dashboard {
           opt.textContent = meta.display_name.toUpperCase();
           select.appendChild(opt);
         }
+
+        // Build every real planet up front (not only the one currently
+        // traveled to) — otherwise a previously-unvisited planet simply
+        // doesn't exist in the scene, which is exactly what made
+        // distant bodies unidentifiable/impossible to label: there was
+        // nothing there to label. Positions are fetched once and cached
+        // resiliently server-side either way (core.resilient_fetch), so
+        // this costs a handful of parallel requests at load, not per visit.
+        await Promise.all(Object.entries(bodies).map(async ([key, meta]) => {
+          try {
+            const resp = await fetch(`/api/solar-system/${key}/position`);
+            if (!resp.ok) return;
+            const position = await resp.json();
+            this._getOrBuildBody(key, meta, position);
+          } catch (err) {
+            console.error(`Failed to pre-build body '${key}':`, err);
+          }
+        }));
       })
       .catch((err) => console.error('Failed to load celestial body list:', err));
 
     select.addEventListener('change', () => this._travelToBody(select.value));
   }
 
-  _displayDistanceUnits(distanceKm) {
+  _displayDistanceUnits(distanceKm, radiusUnits = 0) {
     // Compressed (not-to-scale) placement distance so real interplanetary
-    // ranges stay navigable in this scene: log-scaled, clamped to a band
-    // just beyond Earth's own orbit-camera range.
-    const raw = 10 + 4 * Math.log10(distanceKm / 1e6);
-    return THREE.MathUtils.clamp(raw, 10, 26);
+    // ranges stay navigable in this scene: log-scaled. Every real body is
+    // now built up front (see _initCelestialBodies), not only the one
+    // currently traveled to — so this distance has to keep an
+    // unfocused body from home view looking like a small, identifiable,
+    // non-cluttering background object, not just "far enough for one
+    // focused body to look good." Pushed further out than the original
+    // single-body-at-a-time range for exactly that reason; the actual
+    // TRAVEL close-up shot is unaffected, since _getOrBuildBody's camera
+    // offset is computed relative to the body's own position/radius, not
+    // to this absolute distance. The radiusUnits floor is a safety net
+    // so a large body (Jupiter) can never end up placed closer to the
+    // origin than its own surface — see MAX_BODY_RADIUS_UNITS.
+    const raw = 22 + 7 * Math.log10(distanceKm / 1e6);
+    const compressed = THREE.MathUtils.clamp(raw, 22, 60);
+    return Math.max(compressed, radiusUnits * 3.2);
   }
 
   _getOrBuildBody(bodyKey, meta, position) {
     if (this.bodies[bodyKey]) return this.bodies[bodyKey];
 
-    const radiusUnits = GLOBE_RADIUS * (meta.radius_km / R_EARTH_KM);
-    const displayDistance = this._displayDistanceUnits(position.distance_km);
+    // Jupiter's TRUE size (radius_km=69,911, ~11x Earth's) would put its
+    // true-scale radius (~44 scene units) past this scene's own
+    // interplanetary placement range (~26 units) — same "true size,
+    // compressed distance" tension the Sun already has, just less
+    // extreme. Capped like the Sun's own display radius rather than
+    // rendered fully to scale; still clearly the largest planet (Earth
+    // is ~4 units) without breaking the scene's geometry. Every other
+    // current body (Mercury 1.5 - Earth 4 units) is well under this cap,
+    // so this only ever actually changes anything for Jupiter.
+    const trueRadiusUnits = GLOBE_RADIUS * (meta.radius_km / R_EARTH_KM);
+    const radiusUnits = Math.min(trueRadiusUnits, MAX_BODY_RADIUS_UNITS);
+    const displayDistance = this._displayDistanceUnits(position.distance_km, radiusUnits);
 
     const direction = new THREE.Vector3(...position.direction).normalize();
     const bodyPosition = direction.clone().multiplyScalar(displayDistance);
@@ -797,6 +1083,7 @@ class Dashboard {
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uBaseColor: { value: new THREE.Color(meta.color_hex) },
+        uRimColor: { value: new THREE.Color(PALETTE.cyan) },
         uLightDir: { value: lightDir },
       },
       vertexShader: ROCKY_BODY_VERTEX_SHADER,
@@ -805,6 +1092,7 @@ class Dashboard {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.copy(bodyPosition);
     this.scene.add(mesh);
+    this._addWireframeOverlay(mesh, radiusUnits);
 
     // A faint line from Earth toward the body along the real direction,
     // so the "real direction" claim reads visually, not just as a number.
@@ -812,8 +1100,20 @@ class Dashboard {
     const lineMaterial = new THREE.LineBasicMaterial({ color: PALETTE.amber, transparent: true, opacity: 0.25 });
     this.scene.add(new THREE.Line(lineGeometry, lineMaterial));
 
-    const cameraOffset = direction.clone().multiplyScalar(-radiusUnits * 3.5);
-    cameraOffset.y += radiusUnits * 0.8;
+    // A vertical offset built from a fixed world-Y vector would NOT be
+    // guaranteed perpendicular to `direction` (a real astronomical
+    // direction, which can point anywhere) — on days it happens to
+    // point close to world-Y, adding a raw Y offset partially cancels
+    // against the back-offset instead of lifting the camera, landing
+    // much closer than intended (confirmed: Mars's real direction today
+    // is ~97% aligned with world-Y, which shrank a "3.59x radius" framing
+    // distance down to ~2.7x). Building the vertical component from an
+    // actual cross product keeps the framing distance/angle consistent
+    // regardless of which way the body's real direction happens to point.
+    const upHint = Math.abs(direction.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const sideways = new THREE.Vector3().crossVectors(direction, upHint).normalize();
+    const verticalOffset = new THREE.Vector3().crossVectors(sideways, direction).normalize().multiplyScalar(radiusUnits * 0.8);
+    const cameraOffset = direction.clone().multiplyScalar(-radiusUnits * 3.5).add(verticalOffset);
 
     const body = {
       mesh,
@@ -823,6 +1123,7 @@ class Dashboard {
       cameraPosition: bodyPosition.clone().add(cameraOffset),
     };
     this.bodies[bodyKey] = body;
+    this._addLabel(bodyKey, mesh, meta.display_name.toUpperCase(), meta.color_hex);
     this._attachMoonsForParent(bodyKey, bodyPosition);
     return body;
   }
@@ -899,6 +1200,7 @@ class Dashboard {
       const material = new THREE.ShaderMaterial({
         uniforms: {
           uBaseColor: { value: new THREE.Color(meta.color_hex) },
+          uRimColor: { value: new THREE.Color(PALETTE.cyan) },
           uLightDir: { value: lightDir },
         },
         vertexShader: ROCKY_BODY_VERTEX_SHADER,
@@ -907,8 +1209,10 @@ class Dashboard {
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(meshPosition);
       this.scene.add(mesh);
+      this._addWireframeOverlay(mesh, radiusUnits);
 
       this.moonIndex.push({ key, meta, mesh, position });
+      this._addLabel(key, mesh, meta.display_name.toUpperCase(), meta.color_hex);
     }
   }
 
@@ -953,8 +1257,17 @@ class Dashboard {
   async _travelToBody(bodyKey) {
     const statusEl = document.getElementById('celestial-status');
 
+    this.focusedBodyKey = bodyKey;
+
     if (bodyKey === 'earth') {
       statusEl.textContent = 'RETURNING TO EARTH…';
+      // Widen the constraint to whichever is looser (current vs. home)
+      // BEFORE the tween starts — otherwise OrbitControls.update()'s own
+      // clamp inside the final animation frame (which runs before
+      // onComplete) can clip the landing shot against the body we're
+      // LEAVING's tighter limits, landing closer than intended.
+      this.controls.minDistance = Math.min(this.controls.minDistance, this.homeCamera.minDistance);
+      this.controls.maxDistance = Math.max(this.controls.maxDistance, this.homeCamera.maxDistance);
       this._animateCamera(this.homeCamera.position, this.homeCamera.target, 2200, () => {
         this.controls.minDistance = this.homeCamera.minDistance;
         this.controls.maxDistance = this.homeCamera.maxDistance;
@@ -981,6 +1294,10 @@ class Dashboard {
     const distanceAu = (position.distance_km / 1.496e8).toFixed(3);
     statusEl.textContent = `${meta.display_name.toUpperCase()} — ${distanceAu} AU FROM EARTH (REAL-TIME DIRECTION)`;
 
+    // See the 'earth' branch above for why this widening has to happen
+    // before the tween starts, not in onComplete.
+    this.controls.minDistance = Math.min(this.controls.minDistance, body.minDistance);
+    this.controls.maxDistance = Math.max(this.controls.maxDistance, body.maxDistance);
     this._animateCamera(body.cameraPosition, body.mesh.position, 2800, () => {
       this.controls.minDistance = body.minDistance;
       this.controls.maxDistance = body.maxDistance;
