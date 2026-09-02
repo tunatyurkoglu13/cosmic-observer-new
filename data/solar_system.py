@@ -85,8 +85,27 @@ BODIES: dict[str, dict] = {
         # Saturn's real true-color appearance: pale gold/cream, paler
         # and less contrasty-banded than Jupiter. Has a real ring system
         # rendered separately — see static/dashboard.js's
-        # _addSaturnRings, keyed specifically off bodyKey === "saturn".
+        # _addPlanetRings, keyed off bodyKey === "saturn"/"uranus".
         "color_hex": 0xd9c99a,
+    },
+    "uranus": {
+        "display_name": "Uranus",
+        "radius_km": 25362.0,
+        # Uranus's real true-color appearance: a pale, near-featureless
+        # cyan (methane absorbing red light) — genuinely paler/less
+        # saturated than most illustrations. Also has real rings (fainter
+        # and narrower than Saturn's, discovered 1977) — see
+        # static/dashboard.js's _addPlanetRings.
+        "color_hex": 0x9fd6d6,
+    },
+    "neptune": {
+        "display_name": "Neptune",
+        "radius_km": 24622.0,
+        # Neptune's real true-color appearance: the most vividly blue
+        # planet — methane absorption alone doesn't fully explain its
+        # saturation; an additional, still-unidentified atmospheric
+        # absorber is the leading explanation.
+        "color_hex": 0x3d63c9,
     },
 }
 
@@ -190,6 +209,72 @@ MOONS: dict[str, dict] = {
         "horizons_command": "612",
         "radius_km": 17.6,
         "color_hex": 0x9c9488,
+    },
+    # Uranus's five real major moons — all named after Shakespeare/Pope
+    # characters (uniquely, among moons of the solar system, which are
+    # otherwise almost all named from Greco-Roman myth).
+    "miranda": {
+        "display_name": "Miranda",
+        "parent": "uranus",
+        "horizons_command": "705",
+        "radius_km": 235.8,
+        "color_hex": 0x9a9690,
+    },
+    "ariel": {
+        "display_name": "Ariel",
+        "parent": "uranus",
+        "horizons_command": "701",
+        "radius_km": 578.9,
+        "color_hex": 0xaeada8,  # Ariel has the brightest surface of Uranus's moons
+    },
+    "umbriel": {
+        "display_name": "Umbriel",
+        "parent": "uranus",
+        "horizons_command": "702",
+        "radius_km": 584.7,
+        "color_hex": 0x655f5a,  # the darkest of Uranus's five major moons
+    },
+    "titania": {
+        "display_name": "Titania",
+        "parent": "uranus",
+        "horizons_command": "703",
+        "radius_km": 788.4,  # Uranus's largest moon
+        "color_hex": 0x8d8880,
+    },
+    "oberon": {
+        "display_name": "Oberon",
+        "parent": "uranus",
+        "horizons_command": "704",
+        "radius_km": 761.4,
+        "color_hex": 0x7d766e,
+    },
+    # Neptune's real moons. Triton is overwhelmingly its dominant one —
+    # captured from the Kuiper Belt (a real, well-established fact: it's
+    # the solar system's only large moon on a retrograde orbit, powerful
+    # evidence it didn't form alongside Neptune).
+    "triton": {
+        "display_name": "Triton",
+        "parent": "neptune",
+        "horizons_command": "801",
+        "radius_km": 1353.4,
+        "color_hex": 0xd8cdb8,  # pale pinkish nitrogen-frost surface
+    },
+    "proteus": {
+        "display_name": "Proteus",
+        "parent": "neptune",
+        "horizons_command": "808",
+        "radius_km": 209.0,  # Neptune's 2nd-largest moon, despite being irregularly shaped and very dark
+        "color_hex": 0x6b6560,
+    },
+    "nereid": {
+        "display_name": "Nereid",
+        "parent": "neptune",
+        "horizons_command": "802",
+        # One of the most eccentric orbits of any moon in the solar
+        # system (e~0.75) — its real Neptune-relative distance varies
+        # enormously, unlike every other moon here.
+        "radius_km": 170.0,
+        "color_hex": 0x9a9488,
     },
 }
 

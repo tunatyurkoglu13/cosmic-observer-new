@@ -197,12 +197,13 @@ void main() {
 }
 `;
 
-// Saturn's real ring system — a flat radial band, scanned/tactical
-// rather than photographic: concentric contour bands plus a genuine,
-// real feature, the Cassini Division (the famous dark gap in the main
-// ring system, at ~2.03x Saturn's own radius — see _addSaturnRings for
-// how uInnerRadius/uOuterRadius are set to keep it positioned correctly
-// regardless of the compressed display radius Saturn itself renders at).
+// Real ring systems (Saturn's — bright, wide, iconic; Uranus's — real
+// but far fainter and narrower, discovered only in 1977) — a flat
+// radial band, scanned/tactical rather than photographic: concentric
+// contour bands plus Saturn's genuine, famous Cassini Division gap. See
+// _addPlanetRings for how uInnerRadius/uOuterRadius are set to keep
+// everything positioned correctly regardless of the compressed display
+// radius each planet actually renders at.
 const RING_VERTEX_SHADER = `
 varying float vRadius;
 void main() {
@@ -216,19 +217,25 @@ uniform vec3 uBaseColor;
 uniform vec3 uRimColor;
 uniform float uInnerRadius;
 uniform float uOuterRadius;
+uniform float uMaxAlpha;
 varying float vRadius;
 
 void main() {
   float t = clamp((vRadius - uInnerRadius) / (uOuterRadius - uInnerRadius), 0.0, 1.0);
 
-  float cassini = smoothstep(0.60, 0.63, t) - smoothstep(0.66, 0.69, t);
+  // A dark gap at ~2/3 of the way out — calibrated to land on Saturn's
+  // real, famous Cassini Division; for other ringed planets (Uranus)
+  // this reads as a generic band-gap rather than one specific named
+  // real gap, since precisely placing every one of Uranus's several
+  // narrow real rings is out of scope for this pass.
+  float gap = smoothstep(0.60, 0.63, t) - smoothstep(0.66, 0.69, t);
   float bands = sin(t * 46.0) * 0.5 + 0.5;
 
   vec3 color = mix(uBaseColor * 0.55, uBaseColor * 1.15, bands);
-  color = mix(color, uRimColor * 0.4, cassini);
+  color = mix(color, uRimColor * 0.4, gap);
 
   float edgeFade = smoothstep(0.0, 0.05, t) * (1.0 - smoothstep(0.95, 1.0, t));
-  float alpha = (0.5 - cassini * 0.4) * edgeFade;
+  float alpha = uMaxAlpha * (1.0 - gap * 0.8) * edgeFade;
 
   gl_FragColor = vec4(color, alpha);
 }
@@ -421,23 +428,19 @@ class Dashboard {
     mesh.add(new THREE.LineSegments(new THREE.WireframeGeometry(wireGeometry), wireMaterial));
   }
 
-  _addSaturnRings(mesh, radiusUnits) {
-    // Real proportions: Saturn's main A/B/C ring system spans roughly
-    // 1.28x-2.35x Saturn's own radius (74,500 km-136,780 km, against a
-    // 58,232 km radius) — used directly here rather than an arbitrary
-    // ring size, so the Cassini Division (baked into RING_FRAGMENT_SHADER
-    // at a fixed fraction of inner-to-outer radius) lands in the right
-    // place relative to the planet regardless of radiusUnits.
-    const innerRadius = radiusUnits * 1.28;
-    const outerRadius = radiusUnits * 2.35;
+  _addPlanetRings(mesh, radiusUnits, opts) {
+    const { innerRatio, outerRatio, tiltDeg, colorHex, maxAlpha, wireOpacity } = opts;
+    const innerRadius = radiusUnits * innerRatio;
+    const outerRadius = radiusUnits * outerRatio;
 
     const geometry = new THREE.RingGeometry(innerRadius, outerRadius, 128, 1);
     const material = new THREE.ShaderMaterial({
       uniforms: {
-        uBaseColor: { value: new THREE.Color(0xd9c99a) },
+        uBaseColor: { value: new THREE.Color(colorHex) },
         uRimColor: { value: new THREE.Color(PALETTE.cyan) },
         uInnerRadius: { value: innerRadius },
         uOuterRadius: { value: outerRadius },
+        uMaxAlpha: { value: maxAlpha },
       },
       vertexShader: RING_VERTEX_SHADER,
       fragmentShader: RING_FRAGMENT_SHADER,
@@ -448,20 +451,22 @@ class Dashboard {
     const ring = new THREE.Mesh(geometry, material);
 
     // RingGeometry lies flat in the local XY plane by default; rotate
-    // it to lie roughly in the orbital plane, then apply Saturn's real
-    // axial tilt (~26.7 deg) for its recognizable tilted-ring silhouette.
-    // This is a STYLISTIC tilt around a fixed local axis using Saturn's
-    // real obliquity angle, not a precise real-time render of its
-    // actual pole orientation as seen from Earth right now (that needs
-    // additional ephemeris this pass doesn't fetch) — an honest
+    // it to lie roughly in the orbital plane, then apply the planet's
+    // REAL axial tilt for its recognizable ring silhouette (Saturn
+    // ~26.7 deg; Uranus a dramatic ~97.77 deg — it rotates almost on
+    // its side, a genuine, striking real fact, not a stylization choice).
+    // This is a STYLISTIC tilt around a fixed local axis using the
+    // planet's real obliquity angle, not a precise real-time render of
+    // its actual pole orientation as seen from Earth right now (that
+    // needs additional ephemeris this pass doesn't fetch) — an honest
     // simplification, not a claim of exact current orientation.
-    ring.rotation.x = Math.PI / 2 - THREE.MathUtils.degToRad(26.7);
+    ring.rotation.x = Math.PI / 2 - THREE.MathUtils.degToRad(tiltDeg);
     mesh.add(ring);
 
     // A faint concentric wireframe echo, consistent with every other
     // body's tactical wireframe treatment.
     const wireGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 64, 6);
-    const wireMaterial = new THREE.LineBasicMaterial({ color: PALETTE.cyan, transparent: true, opacity: 0.16 });
+    const wireMaterial = new THREE.LineBasicMaterial({ color: PALETTE.cyan, transparent: true, opacity: wireOpacity });
     const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(wireGeometry), wireMaterial);
     wireframe.rotation.copy(ring.rotation);
     mesh.add(wireframe);
@@ -1176,7 +1181,25 @@ class Dashboard {
     mesh.position.copy(bodyPosition);
     this.scene.add(mesh);
     this._addWireframeOverlay(mesh, radiusUnits);
-    if (bodyKey === 'saturn') this._addSaturnRings(mesh, radiusUnits);
+    if (bodyKey === 'saturn') {
+      // Real proportions: Saturn's main A/B/C ring system spans roughly
+      // 1.28x-2.35x its own radius (74,500 km-136,780 km, vs a 58,232 km
+      // radius).
+      this._addPlanetRings(mesh, radiusUnits, {
+        innerRatio: 1.28, outerRatio: 2.35, tiltDeg: 26.7,
+        colorHex: 0xd9c99a, maxAlpha: 0.5, wireOpacity: 0.16,
+      });
+    } else if (bodyKey === 'uranus') {
+      // Real proportions: Uranus's main ring system spans roughly
+      // 1.5x-2.05x its own radius (~37,850 km-51,150 km, vs a 25,362 km
+      // radius) — real, but genuinely much narrower and fainter than
+      // Saturn's (not a stylistic understatement; discovered only in
+      // 1977, centuries after Saturn's were first resolved).
+      this._addPlanetRings(mesh, radiusUnits, {
+        innerRatio: 1.5, outerRatio: 2.05, tiltDeg: 97.77,
+        colorHex: 0x9fd6d6, maxAlpha: 0.22, wireOpacity: 0.1,
+      });
+    }
 
     // A faint line from Earth toward the body along the real direction,
     // so the "real direction" claim reads visually, not just as a number.

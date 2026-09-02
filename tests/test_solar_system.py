@@ -103,7 +103,7 @@ def test_fetch_position_live_venus_and_mars():
 def test_fetch_moon_position_rejects_unknown_moon(tmp_path):
     client = SolarSystemClient(cache_dir=tmp_path)
     with pytest.raises(ValueError, match="Unknown moon"):
-        client.fetch_moon_position("triton")  # a real moon (Neptune's) but not one this project tracks
+        client.fetch_moon_position("charon")  # a real moon (Pluto's) but not one this project tracks
 
 
 @pytest.mark.network
@@ -208,3 +208,61 @@ def test_fetch_moon_position_live_saturn_moons():
     mimas_dist = client.fetch_moon_position("mimas").distance_km
     titan_dist = client.fetch_moon_position("titan").distance_km
     assert mimas_dist < titan_dist
+
+
+@pytest.mark.network
+def test_fetch_position_live_uranus_and_neptune():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    uranus = client.fetch_position("uranus", force=True)
+    uranus_au = uranus.distance_km / 1.496e8
+    assert 17.5 < uranus_au < 21.0  # Uranus's real Earth-distance range
+
+    neptune = client.fetch_position("neptune", force=True)
+    neptune_au = neptune.distance_km / 1.496e8
+    assert 28.5 < neptune_au < 31.0  # Neptune's real Earth-distance range
+
+    for pos in (uranus, neptune):
+        assert sum(d * d for d in pos.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert sum(d * d for d in pos.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert pos.relative_to == "earth"
+
+
+@pytest.mark.network
+def test_fetch_moon_position_live_uranus_moons():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    # Real semi-major axes (km): Miranda 129390, Ariel 191020, Umbriel
+    # 266000, Titania 435910, Oberon 583520.
+    expected_ranges = {
+        "miranda": (120000, 140000),
+        "ariel": (180000, 200000),
+        "umbriel": (250000, 280000),
+        "titania": (415000, 455000),
+        "oberon": (560000, 605000),
+    }
+    for key, (lo, hi) in expected_ranges.items():
+        pos = client.fetch_moon_position(key, force=True)
+        assert pos.relative_to == "uranus"
+        assert lo < pos.distance_km < hi, f"{key}: {pos.distance_km} not in [{lo}, {hi}]"
+        assert sum(d * d for d in pos.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.network
+def test_fetch_moon_position_live_neptune_moons():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    triton = client.fetch_moon_position("triton", force=True)
+    assert triton.relative_to == "neptune"
+    assert 330000 < triton.distance_km < 380000  # real semi-major axis ~354760 km
+
+    proteus = client.fetch_moon_position("proteus", force=True)
+    assert proteus.relative_to == "neptune"
+    assert 100000 < proteus.distance_km < 135000  # real semi-major axis ~117647 km
+
+    # Nereid's real orbit is highly eccentric (e~0.75) — its distance
+    # varies enormously, so only check it's a real, sane outer-moon
+    # distance and not, say, accidentally equal to Triton's.
+    nereid = client.fetch_moon_position("nereid", force=True)
+    assert nereid.relative_to == "neptune"
+    assert 1000000 < nereid.distance_km < 10000000
