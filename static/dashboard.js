@@ -197,6 +197,43 @@ void main() {
 }
 `;
 
+// Saturn's real ring system — a flat radial band, scanned/tactical
+// rather than photographic: concentric contour bands plus a genuine,
+// real feature, the Cassini Division (the famous dark gap in the main
+// ring system, at ~2.03x Saturn's own radius — see _addSaturnRings for
+// how uInnerRadius/uOuterRadius are set to keep it positioned correctly
+// regardless of the compressed display radius Saturn itself renders at).
+const RING_VERTEX_SHADER = `
+varying float vRadius;
+void main() {
+  vRadius = length(position.xy);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const RING_FRAGMENT_SHADER = `
+uniform vec3 uBaseColor;
+uniform vec3 uRimColor;
+uniform float uInnerRadius;
+uniform float uOuterRadius;
+varying float vRadius;
+
+void main() {
+  float t = clamp((vRadius - uInnerRadius) / (uOuterRadius - uInnerRadius), 0.0, 1.0);
+
+  float cassini = smoothstep(0.60, 0.63, t) - smoothstep(0.66, 0.69, t);
+  float bands = sin(t * 46.0) * 0.5 + 0.5;
+
+  vec3 color = mix(uBaseColor * 0.55, uBaseColor * 1.15, bands);
+  color = mix(color, uRimColor * 0.4, cassini);
+
+  float edgeFade = smoothstep(0.0, 0.05, t) * (1.0 - smoothstep(0.95, 1.0, t));
+  float alpha = (0.5 - cassini * 0.4) * edgeFade;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`;
+
 class Dashboard {
   constructor(snapshot) {
     this.snapshot = snapshot;
@@ -382,6 +419,52 @@ class Dashboard {
       color: PALETTE.cyan, transparent: true, opacity: 0.22,
     });
     mesh.add(new THREE.LineSegments(new THREE.WireframeGeometry(wireGeometry), wireMaterial));
+  }
+
+  _addSaturnRings(mesh, radiusUnits) {
+    // Real proportions: Saturn's main A/B/C ring system spans roughly
+    // 1.28x-2.35x Saturn's own radius (74,500 km-136,780 km, against a
+    // 58,232 km radius) — used directly here rather than an arbitrary
+    // ring size, so the Cassini Division (baked into RING_FRAGMENT_SHADER
+    // at a fixed fraction of inner-to-outer radius) lands in the right
+    // place relative to the planet regardless of radiusUnits.
+    const innerRadius = radiusUnits * 1.28;
+    const outerRadius = radiusUnits * 2.35;
+
+    const geometry = new THREE.RingGeometry(innerRadius, outerRadius, 128, 1);
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uBaseColor: { value: new THREE.Color(0xd9c99a) },
+        uRimColor: { value: new THREE.Color(PALETTE.cyan) },
+        uInnerRadius: { value: innerRadius },
+        uOuterRadius: { value: outerRadius },
+      },
+      vertexShader: RING_VERTEX_SHADER,
+      fragmentShader: RING_FRAGMENT_SHADER,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const ring = new THREE.Mesh(geometry, material);
+
+    // RingGeometry lies flat in the local XY plane by default; rotate
+    // it to lie roughly in the orbital plane, then apply Saturn's real
+    // axial tilt (~26.7 deg) for its recognizable tilted-ring silhouette.
+    // This is a STYLISTIC tilt around a fixed local axis using Saturn's
+    // real obliquity angle, not a precise real-time render of its
+    // actual pole orientation as seen from Earth right now (that needs
+    // additional ephemeris this pass doesn't fetch) — an honest
+    // simplification, not a claim of exact current orientation.
+    ring.rotation.x = Math.PI / 2 - THREE.MathUtils.degToRad(26.7);
+    mesh.add(ring);
+
+    // A faint concentric wireframe echo, consistent with every other
+    // body's tactical wireframe treatment.
+    const wireGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 64, 6);
+    const wireMaterial = new THREE.LineBasicMaterial({ color: PALETTE.cyan, transparent: true, opacity: 0.16 });
+    const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(wireGeometry), wireMaterial);
+    wireframe.rotation.copy(ring.rotation);
+    mesh.add(wireframe);
   }
 
   // -------------------------------------------------------------------
@@ -1093,6 +1176,7 @@ class Dashboard {
     mesh.position.copy(bodyPosition);
     this.scene.add(mesh);
     this._addWireframeOverlay(mesh, radiusUnits);
+    if (bodyKey === 'saturn') this._addSaturnRings(mesh, radiusUnits);
 
     // A faint line from Earth toward the body along the real direction,
     // so the "real direction" claim reads visually, not just as a number.

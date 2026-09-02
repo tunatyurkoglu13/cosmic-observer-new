@@ -79,6 +79,15 @@ BODIES: dict[str, dict] = {
         # double as a fitting stylization of its actual banded structure).
         "color_hex": 0xc9a876,
     },
+    "saturn": {
+        "display_name": "Saturn",
+        "radius_km": 58232.0,
+        # Saturn's real true-color appearance: pale gold/cream, paler
+        # and less contrasty-banded than Jupiter. Has a real ring system
+        # rendered separately — see static/dashboard.js's
+        # _addSaturnRings, keyed specifically off bodyKey === "saturn".
+        "color_hex": 0xd9c99a,
+    },
 }
 
 # Mars's two real natural satellites (Mercury and Venus have none — not
@@ -140,6 +149,47 @@ MOONS: dict[str, dict] = {
         "horizons_command": "504",
         "radius_km": 2410.3,
         "color_hex": 0x6f6459,  # Callisto is the darkest, most heavily cratered Galilean moon
+    },
+    # Saturn's most significant real moons, of its 140+ known — same
+    # "only the individually meaningful ones" scope as Jupiter's four.
+    "mimas": {
+        "display_name": "Mimas",
+        "parent": "saturn",
+        "horizons_command": "601",
+        "radius_km": 198.2,
+        "color_hex": 0xaba398,  # icy pale gray
+    },
+    "enceladus": {
+        "display_name": "Enceladus",
+        "parent": "saturn",
+        "horizons_command": "602",
+        "radius_km": 252.1,
+        "color_hex": 0xe8e6de,  # near-white — the most reflective body in the solar system
+    },
+    "rhea": {
+        "display_name": "Rhea",
+        "parent": "saturn",
+        "horizons_command": "605",
+        "radius_km": 763.5,
+        "color_hex": 0xb8b0a4,
+    },
+    "titan": {
+        "display_name": "Titan",
+        "parent": "saturn",
+        "horizons_command": "606",
+        "radius_km": 2574.7,  # larger than Mercury; the solar system's 2nd-largest moon
+        "color_hex": 0xd9a85c,  # Titan's real hazy orange nitrogen/methane atmosphere
+    },
+    # Helene: a real "Trojan moon" — not just a nearby object, but one
+    # genuinely co-orbital with a larger moon (Dione), librating around
+    # Dione's leading L4 Lagrange point, the same real dynamical
+    # relationship Jupiter's Trojan asteroids have with Jupiter itself.
+    "helene": {
+        "display_name": "Helene",
+        "parent": "saturn",
+        "horizons_command": "612",
+        "radius_km": 17.6,
+        "color_hex": 0x9c9488,
     },
 }
 

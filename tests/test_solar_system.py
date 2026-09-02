@@ -103,7 +103,7 @@ def test_fetch_position_live_venus_and_mars():
 def test_fetch_moon_position_rejects_unknown_moon(tmp_path):
     client = SolarSystemClient(cache_dir=tmp_path)
     with pytest.raises(ValueError, match="Unknown moon"):
-        client.fetch_moon_position("titan")
+        client.fetch_moon_position("triton")  # a real moon (Neptune's) but not one this project tracks
 
 
 @pytest.mark.network
@@ -170,3 +170,41 @@ def test_fetch_moon_position_live_galilean_moons():
     io_dist = client.fetch_moon_position("io").distance_km
     callisto_dist = client.fetch_moon_position("callisto").distance_km
     assert io_dist < callisto_dist
+
+
+@pytest.mark.network
+def test_fetch_position_live_saturn():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+    saturn = client.fetch_position("saturn", force=True)
+    saturn_au = saturn.distance_km / 1.496e8
+    assert 8.0 < saturn_au < 11.0  # Saturn's real Earth-distance range
+    assert sum(d * d for d in saturn.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+    assert sum(d * d for d in saturn.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+    assert saturn.relative_to == "earth"
+
+
+@pytest.mark.network
+def test_fetch_moon_position_live_saturn_moons():
+    client = SolarSystemClient(cache_dir="/tmp/cosmic_observer_test_ss_cache")
+
+    # Real semi-major axes (km): Mimas 185540, Enceladus 238037, Rhea
+    # 527108, Titan 1221870, Helene ~377400 — generous tolerance for
+    # actual orbital position.
+    expected_ranges = {
+        "mimas": (170000, 200000),
+        "enceladus": (220000, 255000),
+        "rhea": (500000, 555000),
+        "titan": (1150000, 1300000),
+        "helene": (350000, 400000),
+    }
+    for key, (lo, hi) in expected_ranges.items():
+        pos = client.fetch_moon_position(key, force=True)
+        assert pos.relative_to == "saturn"
+        assert lo < pos.distance_km < hi, f"{key}: {pos.distance_km} not in [{lo}, {hi}]"
+        assert sum(d * d for d in pos.direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+        assert sum(d * d for d in pos.sun_direction) ** 0.5 == pytest.approx(1.0, abs=1e-6)
+
+    # Real ordering: Mimas closest, Titan farthest.
+    mimas_dist = client.fetch_moon_position("mimas").distance_km
+    titan_dist = client.fetch_moon_position("titan").distance_km
+    assert mimas_dist < titan_dist
