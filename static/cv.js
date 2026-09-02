@@ -1,22 +1,143 @@
-// COSMIC OBSERVER — CV module frontend.
+// COSMIC OBSERVER — SENSOR & TELEMETRY NETWORK frontend.
+// Tab 1 (ISS CV) connects to /ws/cv exactly as before. Tabs 2-6 are real
+// NASA/JPL/STScI/NOAA data feeds, each with its own small loader module
+// below — kept intentionally modular (one function per feed, one small
+// object describing its refresh behavior) so adding a new sensor later
+// is "write a loader + register it," not a rewrite.
+
+// ===========================================================================
+// Shared tactical-HUD chrome: CRT noise overlay + SIGNAL status helpers.
+// Purely decorative/UI-convention (like a camera app's REC dot) — SIGNAL
+// itself reflects a real fetch outcome, not a fabricated claim.
+// ===========================================================================
+
+function initCRTNoise(container) {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'crt-noise-canvas';
+  // Low internal resolution, scaled up via CSS — a chunky, authentic
+  // static texture that's cheap to redraw every frame.
+  canvas.width = 64;
+  canvas.height = 48;
+  container.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(canvas.width, canvas.height);
+
+  function draw() {
+    const buf = imageData.data;
+    for (let i = 0; i < buf.length; i += 4) {
+      const v = Math.random() * 255;
+      buf[i] = v; buf[i + 1] = v; buf[i + 2] = v; buf[i + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+  draw();
+  setInterval(draw, 140);
+  return canvas;
+}
+
+function setSignal(elId, status) {
+  // status: 'optimal' | 'degraded' | 'none'
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.classList.remove('hud-signal-optimal', 'hud-signal-degraded', 'hud-signal-none');
+  if (status === 'optimal') {
+    el.textContent = 'SIGNAL: OPTIMAL';
+    el.classList.add('hud-signal-optimal');
+  } else if (status === 'degraded') {
+    el.textContent = 'SIGNAL: DEGRADED';
+    el.classList.add('hud-signal-degraded');
+  } else {
+    el.textContent = 'NO SIGNAL';
+    el.classList.add('hud-signal-none');
+  }
+}
+
+function formatDataRate(bps) {
+  if (!bps || bps <= 0) return 'IDLE';
+  if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} Mb/s`;
+  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} Kb/s`;
+  return `${bps.toFixed(0)} b/s`;
+}
+
+function formatRangeKm(km) {
+  if (km == null) return '--';
+  const au = km / 1.496e8;
+  if (au >= 0.05) return `${km.toLocaleString()} km (${au.toFixed(3)} AU)`;
+  return `${km.toLocaleString()} km`;
+}
+
+async function fetchJson(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ===========================================================================
+// Tab switching
+// ===========================================================================
+
+const TAB_REFRESH_MS = {
+  dsn: 15000,
+  telescopes: 5 * 60 * 1000,
+  solar: 5 * 60 * 1000,
+  earth: 10 * 60 * 1000,
+  mars: 10 * 60 * 1000,
+};
+
+const tabLoaders = {
+  dsn: loadDSN,
+  telescopes: loadTelescopes,
+  solar: loadSolar,
+  earth: loadEarth,
+  mars: loadMarsRovers,
+};
+
+let activeRefreshTimer = null;
+
+function activateTab(tabKey) {
+  document.querySelectorAll('.tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === tabKey));
+  document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.toggle('active', panel.id === `panel-${tabKey}`));
+
+  if (activeRefreshTimer) {
+    clearInterval(activeRefreshTimer);
+    activeRefreshTimer = null;
+  }
+
+  const loader = tabLoaders[tabKey];
+  if (loader) {
+    loader();
+    const interval = TAB_REFRESH_MS[tabKey];
+    if (interval) activeRefreshTimer = setInterval(loader, interval);
+  }
+}
+
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+});
+
+// ===========================================================================
+// Tab: ISS CV — unchanged live-video WebSocket logic.
 // Connects to /ws/cv, which alternates two message types per frame:
 //   1. a binary WebSocket message: the JPEG-encoded, HUD-annotated frame
 //   2. a text WebSocket message: JSON with that frame's detections + metrics
 // Displayed via an <img> + object URL rather than <canvas>, since we
 // receive an already-fully-rendered image (HUD baked in server-side by
-// cv.hud) — no client-side drawing needed, which is both simpler and
-// cheaper than re-rasterizing onto a canvas every frame.
+// cv.hud) — no client-side drawing needed.
+// ===========================================================================
 
 let ws = null;
 let currentObjectUrl = null;
 
 const videoImg = document.getElementById('video-frame');
 const placeholder = document.getElementById('video-placeholder');
-const statusEl = document.getElementById('cv-status');
+const cvStatusEl = document.getElementById('cv-status');
 const startBtn = document.getElementById('cv-start-btn');
 
 function setStatus(text) {
-  statusEl.textContent = text;
+  cvStatusEl.textContent = text;
 }
 
 function stopStream() {
@@ -93,8 +214,6 @@ function handleMetadataMessage(jsonText) {
   }
 
   if (data.notice) {
-    // A disclosed fallback (e.g. ISS live unreachable -> sample clip) —
-    // informational, not fatal, so the stream keeps running.
     setStatus(`NOTICE: ${data.notice}`);
     return;
   }
@@ -152,9 +271,6 @@ async function identifyImage() {
     return;
   }
 
-  // Zero-shot identification is a one-off analysis, not a stream — stop
-  // any active /ws/cv connection first so it doesn't fight over the
-  // <img> element with the identify result.
   stopStream();
 
   const queries = document.getElementById('identify-queries').value;
@@ -206,3 +322,182 @@ async function identifyImage() {
 startBtn.addEventListener('click', startStream);
 document.getElementById('cv-upload-btn').addEventListener('click', uploadVideo);
 document.getElementById('identify-btn').addEventListener('click', identifyImage);
+initCRTNoise(document.getElementById('cv-visual'));
+
+// ===========================================================================
+// Tab: DSN NOW — NASA Deep Space Network live dish status.
+// ===========================================================================
+
+async function loadDSN() {
+  const dishesEl = document.getElementById('dsn-dishes');
+  try {
+    const status = await fetchJson('/api/sensors/dsn');
+
+    const byStation = {};
+    for (const dish of status.dishes) {
+      (byStation[dish.station] = byStation[dish.station] || []).push(dish);
+    }
+
+    let html = '';
+    for (const [station, dishes] of Object.entries(byStation)) {
+      html += `<div class="dsn-station-head">${station.toUpperCase()}</div>`;
+      for (const dish of dishes) {
+        const isIdle = dish.target_name === 'DSN' || dish.target_name === 'DSS' || !dish.target_name;
+        const activeSignal = dish.signals.find((s) => s.active && s.direction === 'down') || dish.signals.find((s) => s.active);
+        const rateText = activeSignal ? formatDataRate(activeSignal.data_rate_bps) : 'IDLE';
+        const bandText = activeSignal ? ` &middot; ${activeSignal.band}-BAND` : '';
+        const rangeText = dish.downlink_range_km != null ? ` &middot; ${formatRangeKm(dish.downlink_range_km)}` : '';
+        html += `<div class="dsn-dish-row ${isIdle ? 'idle' : ''}">
+          <b>${dish.name}</b> &rarr; <span class="dish-target">${dish.target_name || 'IDLE'}</span>
+          <span class="dish-rate" style="float:right;">${rateText}</span>
+          <div class="dish-meta">${dish.activity}${bandText}${rangeText}</div>
+        </div>`;
+      }
+    }
+    dishesEl.innerHTML = html || '<div class="dim">NO DISH DATA</div>';
+
+    document.getElementById('dsn-active-count').textContent =
+      status.dishes.filter((d) => d.signals.some((s) => s.active)).length;
+    document.getElementById('dsn-spacecraft-count').textContent = status.active_spacecraft.length;
+    const totalDown = status.dishes
+      .flatMap((d) => d.signals)
+      .filter((s) => s.direction === 'down' && s.active)
+      .reduce((sum, s) => sum + s.data_rate_bps, 0);
+    document.getElementById('dsn-total-rate').textContent = formatDataRate(totalDown);
+
+    document.getElementById('dsn-spacecraft-list').innerHTML = status.active_spacecraft.length
+      ? status.active_spacecraft.map((s) => `<div class="dsn-dish-row">${s}</div>`).join('')
+      : '<div class="dim">NONE CURRENTLY TRACKED</div>';
+
+    setSignal('dsn-signal-status', 'optimal');
+  } catch (err) {
+    dishesEl.innerHTML = `<div class="dim">LINK DOWN: ${err.message || err}</div>`;
+    setSignal('dsn-signal-status', 'none');
+  }
+}
+
+// ===========================================================================
+// Tab: TELESCOPES — most recently archived real Hubble/JWST observation (MAST).
+// ===========================================================================
+
+async function loadTelescopes() {
+  const signalEl = document.getElementById('telescopes-signal');
+  let anyFailed = false;
+
+  for (const [key, prefix] of [['hubble', 'hst'], ['jwst', 'jwst']]) {
+    try {
+      const obs = await fetchJson(`/api/sensors/telescopes/${key}`);
+      document.getElementById(`${prefix}-target`).textContent = obs.target_name;
+      document.getElementById(`${prefix}-radec`).textContent = `${obs.ra_deg.toFixed(3)}°, ${obs.dec_deg.toFixed(3)}°`;
+      document.getElementById(`${prefix}-instrument`).textContent = obs.instrument || '--';
+      document.getElementById(`${prefix}-proposal`).textContent = obs.proposal_id ? `#${obs.proposal_id}` : '--';
+      document.getElementById(`${prefix}-time`).textContent = obs.observed_at_utc
+        ? obs.observed_at_utc.replace('T', ' ').slice(0, 19) + ' UTC'
+        : '--';
+    } catch (err) {
+      anyFailed = true;
+      document.getElementById(`${prefix}-target`).textContent = 'NO SIGNAL';
+    }
+  }
+
+  signalEl.textContent = anyFailed ? 'LINK DEGRADED' : 'MAST ARCHIVE LINK ESTABLISHED';
+  signalEl.className = anyFailed ? 'hud-signal-degraded' : 'hud-signal-optimal';
+}
+
+// ===========================================================================
+// Tab: SOLAR — NASA SDO live imagery (direct public image URLs, no backend
+// call needed — these are already publicly served static image endpoints).
+// ===========================================================================
+
+const SDO_CHANNEL_INFO = {
+  '0171': '171Å (extreme UV) — the quiet corona and upper transition region, ~600,000 K plasma. Shows coronal loops well.',
+  '0193': '193Å (extreme UV) — corona and hot flare plasma, ~1.25 million K. NASA\'s default "quiet Sun" view.',
+  '0211': '211Å (extreme UV) — active regions, ~2 million K. Highlights magnetically active areas.',
+  '0304': '304Å (extreme UV) — chromosphere and transition region, ~50,000 K. Shows prominences at the limb.',
+  HMIIC: 'HMI Continuum — ordinary visible light. The photosphere as your eye would see it (through a solar filter), including sunspots.',
+  HMIB: 'HMI Magnetogram — line-of-sight magnetic field strength. White/black = opposite magnetic polarity.',
+};
+
+function loadSolar() {
+  const select = document.getElementById('solar-channel');
+  const channel = select.value;
+  const img = document.getElementById('solar-img');
+  const cacheBust = Date.now();
+  img.src = `https://sdo.gsfc.nasa.gov/assets/img/latest/latest_1024_${channel}.jpg?_=${cacheBust}`;
+  document.getElementById('solar-desc').textContent = SDO_CHANNEL_INFO[channel] || '';
+
+  img.onload = () => setSignal('solar-signal', 'optimal');
+  img.onerror = () => setSignal('solar-signal', 'none');
+}
+
+document.getElementById('solar-channel').addEventListener('change', loadSolar);
+initCRTNoise(document.getElementById('solar-visual'));
+
+// ===========================================================================
+// Tab: EARTH — DSCOVR/EPIC latest real full-Earth photo.
+// ===========================================================================
+
+async function loadEarth() {
+  const img = document.getElementById('earth-img');
+  const ph = document.getElementById('earth-placeholder');
+  try {
+    const data = await fetchJson('/api/sensors/earth-epic');
+    img.src = data.image_url;
+    img.style.display = 'block';
+    ph.style.display = 'none';
+    document.getElementById('earth-centroid').textContent = `${data.centroid_lat.toFixed(1)}°, ${data.centroid_lon.toFixed(1)}°`;
+    document.getElementById('earth-time').textContent = data.date + ' UTC';
+    setSignal('earth-signal', 'optimal');
+  } catch (err) {
+    img.style.display = 'none';
+    ph.style.display = 'block';
+    ph.textContent = `NO SIGNAL: ${err.message || err}`;
+    setSignal('earth-signal', 'none');
+  }
+}
+
+initCRTNoise(document.getElementById('earth-visual'));
+
+// ===========================================================================
+// Tab: MARS ROVERS — latest real downlinked photos (Curiosity/Perseverance).
+// ===========================================================================
+
+let currentRover = 'curiosity';
+
+async function loadMarsRovers() {
+  const gridEl = document.getElementById('rover-grid');
+  document.getElementById('mars-rover-name').textContent = currentRover.toUpperCase();
+  try {
+    const data = await fetchJson(`/api/sensors/mars-rover/${currentRover}`);
+    if (data.count === 0) {
+      gridEl.innerHTML = '<div class="dim">NO RECENT PHOTOS RETURNED</div>';
+    } else {
+      gridEl.innerHTML = data.photos
+        .slice(0, 12)
+        .map((p) => `
+          <div class="rover-photo">
+            <img src="${p.img_src}" alt="${p.camera_full_name}" loading="lazy" />
+            <div class="rover-caption">${p.camera_name} &middot; SOL ${p.sol} &middot; ${p.earth_date}</div>
+          </div>
+        `)
+        .join('');
+      document.getElementById('mars-rover-status').textContent = data.photos[0].rover_status.toUpperCase();
+      document.getElementById('mars-rover-sol').textContent = data.photos[0].sol;
+    }
+    setSignal('mars-signal', 'optimal');
+  } catch (err) {
+    gridEl.innerHTML = `<div class="dim">MARS UPLINK OFFLINE — ${err.message || err}<br><br>This is a real NASA API outage (this project's Mars Rover Photos client hit this during development too — see data/mars_rover_photos.py), not a simulated failure. It's cached and retried automatically once the service recovers.</div>`;
+    document.getElementById('mars-rover-status').textContent = '--';
+    document.getElementById('mars-rover-sol').textContent = '--';
+    setSignal('mars-signal', 'none');
+  }
+}
+
+document.querySelectorAll('#panel-mars .co-btn[data-rover]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#panel-mars .co-btn[data-rover]').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentRover = btn.dataset.rover;
+    loadMarsRovers();
+  });
+});

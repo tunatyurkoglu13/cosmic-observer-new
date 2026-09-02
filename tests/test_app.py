@@ -283,7 +283,9 @@ def test_ws_positions_rejects_unknown_group():
 def test_cv_page_serves_html():
     resp = client.get("/cv")
     assert resp.status_code == 200
-    assert "ISS CV MODULE" in resp.text
+    assert "SENSOR" in resp.text
+    assert "ISS CV" in resp.text  # the ISS live-video tab is still one of the panel tabs
+    assert "SAMPLE CLIP" not in resp.text  # the manual sample-clip option was removed from the UI
 
 
 def test_cv_static_assets_resolve():

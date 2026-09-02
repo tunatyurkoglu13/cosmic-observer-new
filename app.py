@@ -37,11 +37,15 @@ from cv.iss_live import resolve_iss_stream_url
 from cv.open_vocabulary import DEFAULT_SPACE_QUERIES, OpenVocabularyDetector
 from cv.streak_detection import draw_streaks, detect_streaks
 from cv.streamer import FrameProcessor, build_sample_video, encode_jpeg
+from data.dscovr_epic import EPICClient
+from data.dsn import DSNClient
+from data.mars_rover_photos import ROVERS as MARS_ROVERS, MarsRoverPhotosClient
 from data.nasa_cneos import CNEOSClient
 from data.neows import NeoWsClient
 from data.sbdb import SBDBClient
 from data.small_bodies import CURATED_BODIES as SMALL_BODIES, SmallBodyTracker
 from data.solar_system import BODIES as SOLAR_SYSTEM_BODIES, MOONS as SOLAR_SYSTEM_MOONS, SolarSystemClient
+from data.space_telescopes import TELESCOPES, SpaceTelescopeClient
 from data.space_weather import fetch_current_snapshot
 from reports.launch_analysis import generate_launch_analysis
 from reports.risk_report import generate_risk_report
@@ -462,6 +466,74 @@ def space_weather():
         return fetch_current_snapshot()
     except requests.RequestException:
         raise HTTPException(503, "NOAA space weather feed is currently unreachable — external service outage, try again shortly.")
+
+
+# ---------------------------------------------------------------------------
+# Sensor feeds — real live/near-live telemetry and imagery from NASA/JPL/STScI
+# instruments, for the SENSOR FEEDS panel (static/cv.html). Each client
+# follows the same core.resilient_fetch pattern as everything else in this
+# project — real data with resilient caching, never fabricated fallback data.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sensors/dsn")
+def sensors_dsn():
+    """Live NASA Deep Space Network status (data.dsn) — which spacecraft each dish is tracking, signal rate, range."""
+    client = DSNClient()
+    try:
+        status = client.fetch_status()
+    except requests.RequestException:
+        raise HTTPException(503, "DSN Now feed is currently unreachable — external service outage, try again shortly.")
+    return {
+        "fetched_at": status.fetched_at,
+        "station_names": status.station_names,
+        "dishes": status.dishes,
+        "active_spacecraft": status.active_spacecraft,  # a @property, not a dataclass field — computed here so it actually appears in the JSON
+    }
+
+
+@app.get("/api/sensors/telescopes/{telescope}")
+def sensors_telescope(telescope: str):
+    """Most recently archived real Hubble/JWST observation (data.space_telescopes, via MAST)."""
+    client = SpaceTelescopeClient()
+    try:
+        return client.fetch_latest_observation(telescope)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except requests.RequestException:
+        raise HTTPException(503, "MAST archive is currently unreachable — external service outage, try again shortly.")
+
+
+@app.get("/api/sensors/telescopes")
+def sensors_telescopes_list():
+    return TELESCOPES
+
+
+@app.get("/api/sensors/earth-epic")
+def sensors_earth_epic():
+    """Latest real full-Earth photo from DSCOVR/EPIC (data.dscovr_epic)."""
+    client = EPICClient()
+    try:
+        return client.fetch_latest()
+    except requests.RequestException:
+        raise HTTPException(503, "EPIC API is currently unreachable — external service outage, try again shortly.")
+
+
+@app.get("/api/sensors/mars-rover/{rover}")
+def sensors_mars_rover(rover: str):
+    """Most recent real downlinked photos from a Mars rover (data.mars_rover_photos)."""
+    client = MarsRoverPhotosClient()
+    try:
+        photos = client.fetch_latest(rover)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except requests.RequestException:
+        raise HTTPException(503, "NASA Mars Rover Photos API is currently unreachable — external service outage, try again shortly.")
+    return {"rover": rover, "count": len(photos), "photos": photos}
+
+
+@app.get("/api/sensors/mars-rovers")
+def sensors_mars_rovers_list():
+    return list(MARS_ROVERS)
 
 
 # ---------------------------------------------------------------------------
