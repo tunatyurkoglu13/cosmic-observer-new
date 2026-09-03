@@ -223,6 +223,8 @@ function handleMetadataMessage(jsonText) {
   document.getElementById('stat-targets').textContent = data.detections.length;
   document.getElementById('stat-conf').textContent = data.avg_confidence.toFixed(2);
 
+  updateAnomalyDisplay(data.anomaly);
+
   const listEl = document.getElementById('detections-list');
   if (data.detections.length === 0) {
     listEl.innerHTML = '<div class="dim">NO TARGETS ACQUIRED</div>';
@@ -323,6 +325,73 @@ startBtn.addEventListener('click', startStream);
 document.getElementById('cv-upload-btn').addEventListener('click', uploadVideo);
 document.getElementById('identify-btn').addEventListener('click', identifyImage);
 initCRTNoise(document.getElementById('cv-visual'));
+
+// ---------------------------------------------------------------------
+// Anomaly detection (ConvAutoencoder, cv/anomaly.py + cv/anomaly_train.py)
+// ---------------------------------------------------------------------
+
+function updateAnomalyDisplay(anomaly) {
+  const errorEl = document.getElementById('anomaly-error');
+  const thresholdEl = document.getElementById('anomaly-threshold');
+  const statusEl = document.getElementById('anomaly-status');
+
+  if (!anomaly) {
+    errorEl.textContent = '--';
+    thresholdEl.textContent = '--';
+    statusEl.textContent = 'MODEL NOT LOADED';
+    statusEl.className = 'hud-signal-degraded';
+    return;
+  }
+
+  errorEl.textContent = anomaly.reconstruction_error.toFixed(4);
+  thresholdEl.textContent = anomaly.threshold.toFixed(4);
+  if (anomaly.is_anomaly) {
+    statusEl.textContent = `ANOMALY (severity ${anomaly.severity.toFixed(2)})`;
+    statusEl.className = 'hud-signal-none';
+  } else {
+    statusEl.textContent = 'NOMINAL';
+    statusEl.className = 'hud-signal-optimal';
+  }
+}
+
+async function loadAnomalyModelStatus() {
+  const el = document.getElementById('anomaly-model-status');
+  try {
+    const data = await fetchJson('/api/cv/anomaly-status');
+    if (data.model_loaded) {
+      el.textContent = `LOADED (thr ${data.threshold.toFixed(4)})`;
+      el.className = 'hud-signal-optimal';
+    } else {
+      el.textContent = 'NOT TRAINED';
+      el.className = 'hud-signal-degraded';
+    }
+  } catch (err) {
+    el.textContent = 'UNKNOWN';
+  }
+}
+
+async function loadAnomalyEventLog() {
+  const el = document.getElementById('anomaly-log');
+  try {
+    const data = await fetchJson('/api/cv/anomaly-log?limit=10');
+    if (data.count === 0) {
+      el.innerHTML = '<div class="dim">NO ANOMALIES LOGGED</div>';
+      return;
+    }
+    el.innerHTML = data.events
+      .map((e) => `<div class="det-row" style="border-left-color:#ff3355;">
+        <b>${e.timestamp.replace('T', ' ').slice(0, 19)} UTC</b><br>
+        <span class="dim">err ${e.reconstruction_error.toFixed(4)} / thr ${e.threshold.toFixed(4)} &middot; ${e.source}</span>
+      </div>`)
+      .join('');
+  } catch (err) {
+    el.innerHTML = `<div class="dim">LOG UNAVAILABLE</div>`;
+  }
+}
+
+loadAnomalyModelStatus();
+loadAnomalyEventLog();
+setInterval(loadAnomalyEventLog, 10000);
 
 // ===========================================================================
 // Tab: DSN NOW — NASA Deep Space Network live dish status.

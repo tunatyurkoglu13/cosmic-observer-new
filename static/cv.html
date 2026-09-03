@@ -244,6 +244,18 @@
           </table>
         </div>
 
+        <div id="anomaly-panel" class="co-panel">
+          <h3>ANOMALY DETECTION</h3>
+          <table class="telemetry-table">
+            <tr><td>MODEL</td><td class="value" id="anomaly-model-status">--</td></tr>
+            <tr><td>RECON. ERROR</td><td class="value" id="anomaly-error">--</td></tr>
+            <tr><td>THRESHOLD</td><td class="value" id="anomaly-threshold">--</td></tr>
+            <tr><td>STATUS</td><td class="value" id="anomaly-status">--</td></tr>
+          </table>
+          <div class="dim" style="margin-top:6px;font-size:9px;">ConvAutoencoder trained on real NASA imagery (cv/anomaly_train.py) — reconstruction error above threshold flags a frame as anomalous.</div>
+          <div id="anomaly-log" style="margin-top:8px; max-height:120px; overflow-y:auto;"><div class="dim">NO ANOMALIES LOGGED</div></div>
+        </div>
+
         <div id="detections-panel" class="co-panel">
           <h3>DETECTED OBJECTS</h3>
           <div id="detections-list"><div class="dim">NO TARGETS ACQUIRED</div></div>

@@ -294,6 +294,29 @@ def test_cv_static_assets_resolve():
         assert resp.status_code == 200
 
 
+def test_cv_anomaly_status_reports_real_model_state():
+    resp = client.get("/api/cv/anomaly-status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "model_loaded" in data
+    # This project's own trained checkpoint (cv.anomaly_train) is present
+    # in this dev environment, so a genuinely loaded model is expected —
+    # but the endpoint itself must not error either way if it's absent.
+    if data["model_loaded"]:
+        assert isinstance(data["threshold"], float)
+    else:
+        assert data["threshold"] is None
+
+
+def test_cv_anomaly_log_returns_real_shape():
+    resp = client.get("/api/cv/anomaly-log")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "count" in data
+    assert "events" in data
+    assert isinstance(data["events"], list)
+
+
 def test_cv_upload_rejects_non_video_content_type():
     resp = client.post(
         "/api/cv/upload",

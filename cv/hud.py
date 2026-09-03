@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from cv.anomaly import AnomalyResult
 from cv.detector import Detection
 from viz.retro_ui import PALETTE
 
@@ -124,16 +125,38 @@ def draw_scanlines(frame: np.ndarray, spacing: int = 3, opacity: float = 0.12) -
     cv2.addWeighted(overlay, opacity, frame, 1 - opacity, 0, frame)
 
 
+def draw_anomaly_banner(frame: np.ndarray, anomaly: AnomalyResult) -> None:
+    """
+    A bold red banner just below the status bar when the trained
+    autoencoder's reconstruction error for this frame exceeds its
+    threshold (see cv.anomaly.AnomalyDetector) — the literal "ANOMALY"
+    HUD warning. Severity (how far past threshold) scales the banner's
+    background opacity, so a borderline anomaly reads differently from a
+    wildly-off-distribution one rather than a flat on/off flag.
+    """
+    h, w = frame.shape[:2]
+    bar_y0, bar_h = 28, 22
+    intensity = min(1.0, 0.5 + 0.5 * min(anomaly.severity, 1.0))
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, bar_y0), (w, bar_y0 + bar_h), (0, 0, 60), -1)
+    cv2.addWeighted(overlay, intensity, frame, 1 - intensity, 0, frame)
+
+    text = f"[!] ANOMALY DETECTED — RECONSTRUCTION ERROR {anomaly.reconstruction_error:.4f} (THRESHOLD {anomaly.threshold:.4f})"
+    cv2.putText(frame, text, (8, bar_y0 + 16), FONT, 0.42, ALERT_RED, 1, cv2.LINE_AA)
+
+
 def draw_hud(
     frame: np.ndarray,
     detections: list[Detection],
     metrics: FrameMetrics,
     source_label: str = "SAMPLE",
     class_colors: dict[str, tuple[int, int, int]] | None = None,
+    anomaly: AnomalyResult | None = None,
 ) -> np.ndarray:
     """
     Draw the full retro HUD onto a frame: per-detection reticle + label,
-    top status bar, and scanline texture.
+    top status bar, optional anomaly warning banner, and scanline texture.
 
     Args:
         frame: BGR frame (modified in place AND returned for convenience).
@@ -143,6 +166,9 @@ def draw_hud(
         class_colors: optional per-class-name color override; unlisted
             classes cycle through the retro palette by a simple hash so
             different classes are still visually distinguishable.
+        anomaly: this frame's AnomalyResult (cv.anomaly.AnomalyDetector),
+            or None if no trained anomaly model is loaded. Only draws the
+            warning banner when .is_anomaly is True.
 
     Returns:
         The same frame array, annotated in place.
@@ -156,5 +182,7 @@ def draw_hud(
         draw_label(frame, det.box_xyxy, f"{det.class_name.upper()} {det.confidence:.2f}", color)
 
     draw_status_bar(frame, metrics, source_label)
+    if anomaly is not None and anomaly.is_anomaly:
+        draw_anomaly_banner(frame, anomaly)
     draw_scanlines(frame)
     return frame

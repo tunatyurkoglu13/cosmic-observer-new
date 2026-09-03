@@ -29,10 +29,14 @@ from typing import Iterator
 import cv2
 import numpy as np
 
+from cv.anomaly import AnomalyDetector, AnomalyResult
 from cv.detector import Detection, SpaceObjectDetector
 from cv.hud import FrameMetrics, draw_hud
 
 SAMPLE_VIDEO_PATH = Path(__file__).resolve().parent.parent / "static" / "cv_sample.mp4"
+
+ANOMALY_WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "models" / "anomaly_autoencoder.pt"
+ANOMALY_META_PATH = Path(__file__).resolve().parent.parent / "models" / "anomaly_meta.json"
 
 
 @dataclass
@@ -42,22 +46,37 @@ class ProcessedFrame:
     frame_bgr: np.ndarray
     detections: list[Detection]
     metrics: FrameMetrics
+    anomaly: AnomalyResult | None = None  # None when no trained model is available — see FrameProcessor.__init__
 
 
 class FrameProcessor:
-    """Runs detection + HUD annotation on individual frames."""
+    """Runs detection + anomaly scoring + HUD annotation on individual frames."""
 
     def __init__(self, weights: str = "yolov8n.pt", confidence_threshold: float = 0.35):
         self.detector = SpaceObjectDetector(weights=weights)
         self.confidence_threshold = confidence_threshold
         self.metrics = FrameMetrics()
 
+        # Anomaly detection degrades gracefully rather than crashing the
+        # whole live stream if `python -m cv.anomaly_train` hasn't been
+        # run yet (or its output was deleted) — genuinely optional, same
+        # spirit as this project's resilient-fetch data clients.
+        self.anomaly_detector: AnomalyDetector | None = None
+        if ANOMALY_WEIGHTS_PATH.exists() and ANOMALY_META_PATH.exists():
+            try:
+                self.anomaly_detector = AnomalyDetector.load(ANOMALY_WEIGHTS_PATH, ANOMALY_META_PATH)
+            except Exception:
+                self.anomaly_detector = None
+
     def process(self, frame_bgr: np.ndarray, source_label: str = "SAMPLE") -> ProcessedFrame:
-        """Run detection on one frame and return it HUD-annotated (frame is modified in place)."""
+        """Run detection + anomaly scoring on one frame and return it HUD-annotated (frame is modified in place)."""
         detections = self.detector.detect(frame_bgr, confidence_threshold=self.confidence_threshold)
         self.metrics.update(detections)
-        draw_hud(frame_bgr, detections, self.metrics, source_label=source_label)
-        return ProcessedFrame(frame_bgr=frame_bgr, detections=detections, metrics=self.metrics)
+
+        anomaly_result = self.anomaly_detector.score_frame(frame_bgr) if self.anomaly_detector else None
+
+        draw_hud(frame_bgr, detections, self.metrics, source_label=source_label, anomaly=anomaly_result)
+        return ProcessedFrame(frame_bgr=frame_bgr, detections=detections, metrics=self.metrics, anomaly=anomaly_result)
 
 
 class VideoFileStreamer:

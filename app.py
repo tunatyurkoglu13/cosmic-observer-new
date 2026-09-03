@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -611,6 +612,14 @@ async def ws_positions(websocket: WebSocket, group: str = "stations", interval_s
 _cv_processor: FrameProcessor | None = None
 _cv_upload_state: dict[str, Path] = {}
 
+# In-memory anomaly event log — a lightweight, deliberately simple
+# substitute for a real time-series store (this project's overall scope
+# doesn't currently warrant one; see the "next level" roadmap discussion
+# this was requested alongside). Bounded so it can't grow unbounded over
+# a long-running stream; resets on server restart, which is an honest
+# limitation, not a hidden one.
+_anomaly_log: deque[dict] = deque(maxlen=200)
+
 
 def _get_cv_processor() -> FrameProcessor:
     """Lazily instantiate the YOLO-backed processor once (loading weights is expensive; don't do it at import time)."""
@@ -634,6 +643,23 @@ def _get_open_vocab_detector() -> OpenVocabularyDetector:
 @app.get("/cv")
 def cv_page():
     return FileResponse(f"{STATIC_DIR}/cv.html")
+
+
+@app.get("/api/cv/anomaly-status")
+def cv_anomaly_status():
+    """Whether a trained anomaly-detection model is currently loaded, and its deployed threshold."""
+    processor = _get_cv_processor()
+    if processor.anomaly_detector is None:
+        return {"model_loaded": False, "threshold": None}
+    return {"model_loaded": True, "threshold": processor.anomaly_detector.threshold}
+
+
+@app.get("/api/cv/anomaly-log")
+def cv_anomaly_log(limit: int = 50):
+    """Recent real anomaly events flagged by the live stream (in-memory, resets on server restart)."""
+    events = list(_anomaly_log)[-limit:]
+    events.reverse()  # most recent first
+    return {"count": len(events), "events": events}
 
 
 @app.post("/api/cv/upload")
@@ -849,6 +875,24 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
             result = await asyncio.to_thread(processor.process, frame, label)
             jpeg_bytes = await asyncio.to_thread(encode_jpeg, result.frame_bgr)
 
+            anomaly_payload = None
+            if result.anomaly is not None:
+                anomaly_payload = {
+                    "is_anomaly": result.anomaly.is_anomaly,
+                    "reconstruction_error": result.anomaly.reconstruction_error,
+                    "threshold": result.anomaly.threshold,
+                    "severity": result.anomaly.severity,
+                }
+                if result.anomaly.is_anomaly:
+                    _anomaly_log.append({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "source": label,
+                        "frame_index": result.metrics.frame_index,
+                        "reconstruction_error": result.anomaly.reconstruction_error,
+                        "threshold": result.anomaly.threshold,
+                        "severity": result.anomaly.severity,
+                    })
+
             await websocket.send_bytes(jpeg_bytes)
             await websocket.send_json({
                 "detections": [
@@ -858,6 +902,7 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
                 "fps": result.metrics.fps,
                 "frame_index": result.metrics.frame_index,
                 "avg_confidence": result.metrics.avg_confidence,
+                "anomaly": anomaly_payload,
             })
             await asyncio.sleep(interval_s)
     except WebSocketDisconnect:

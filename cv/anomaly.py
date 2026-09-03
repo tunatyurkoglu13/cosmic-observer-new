@@ -24,8 +24,11 @@ of "anomaly":
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -217,3 +220,69 @@ class TelemetryAnomalyDetector:
         if not self._fitted:
             raise RuntimeError("TelemetryAnomalyDetector.fit() must be called before anomaly_score()")
         return self._model.decision_function(telemetry)
+
+
+def preprocess_frame_for_autoencoder(frame_bgr: np.ndarray) -> np.ndarray:
+    """
+    BGR video frame -> the exact (64, 64) float32 [0, 1] grayscale array
+    SpaceAutoencoder expects. Shared by training, evaluation, and live
+    inference so all three paths preprocess identically — a training/
+    inference preprocessing mismatch is a classic, easy-to-miss source of
+    silently-wrong anomaly scores.
+    """
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (SpaceAutoencoder.INPUT_SIZE, SpaceAutoencoder.INPUT_SIZE), interpolation=cv2.INTER_AREA)
+    return (resized.astype(np.float32) / 255.0)
+
+
+@dataclass
+class AnomalyResult:
+    """One frame/image's anomaly score against a trained AnomalyDetector."""
+
+    reconstruction_error: float
+    threshold: float
+    is_anomaly: bool
+
+    @property
+    def severity(self) -> float:
+        """How far past the threshold, as a ratio (0 = right at threshold, 1 = double the threshold, etc.) — for a HUD intensity/color ramp rather than a flat on/off flag."""
+        if self.threshold <= 0:
+            return 0.0
+        return max(0.0, (self.reconstruction_error - self.threshold) / self.threshold)
+
+
+class AnomalyDetector:
+    """
+    Deployable wrapper around SpaceAutoencoder: bundles trained weights +
+    a decision threshold + the exact preprocessing pipeline, so a caller
+    (the live /ws/cv stream, a batch evaluation script) can go straight
+    from a raw BGR frame to an anomaly flag without re-deriving any of
+    train_autoencoder()'s conventions.
+
+    The threshold is NOT baked into the model architecture — it's a
+    statistic (mean + k*std of reconstruction error on held-out NORMAL
+    data, per this project's own evaluation script) computed once after
+    training and saved alongside the weights, so re-tuning it doesn't
+    require retraining.
+    """
+
+    def __init__(self, model: SpaceAutoencoder, threshold: float):
+        self.model = model
+        self.threshold = threshold
+        self.model.eval()
+
+    def score_frame(self, frame_bgr: np.ndarray) -> AnomalyResult:
+        image = preprocess_frame_for_autoencoder(frame_bgr)
+        error = float(reconstruction_error(self.model, image[np.newaxis, ...])[0])
+        return AnomalyResult(reconstruction_error=error, threshold=self.threshold, is_anomaly=error > self.threshold)
+
+    def save(self, weights_path: Path | str, meta_path: Path | str) -> None:
+        torch.save(self.model.state_dict(), weights_path)
+        Path(meta_path).write_text(json.dumps({"threshold": self.threshold}))
+
+    @classmethod
+    def load(cls, weights_path: Path | str, meta_path: Path | str) -> "AnomalyDetector":
+        model = SpaceAutoencoder()
+        model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+        threshold = json.loads(Path(meta_path).read_text())["threshold"]
+        return cls(model=model, threshold=threshold)

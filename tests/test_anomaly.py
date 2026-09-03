@@ -3,8 +3,11 @@ import pytest
 import torch
 
 from cv.anomaly import (
+    AnomalyDetector,
+    AnomalyResult,
     SpaceAutoencoder,
     TelemetryAnomalyDetector,
+    preprocess_frame_for_autoencoder,
     reconstruction_error,
     reconstruction_loss,
     train_autoencoder,
@@ -127,3 +130,58 @@ def test_telemetry_anomaly_detector_requires_fit_before_predict():
         detector.predict(np.zeros((1, 3)))
     with pytest.raises(RuntimeError):
         detector.anomaly_score(np.zeros((1, 3)))
+
+
+def test_preprocess_frame_for_autoencoder_shape_and_range():
+    frame_bgr = (np.random.default_rng(0).random((200, 300, 3)) * 255).astype(np.uint8)
+    out = preprocess_frame_for_autoencoder(frame_bgr)
+    assert out.shape == (SpaceAutoencoder.INPUT_SIZE, SpaceAutoencoder.INPUT_SIZE)
+    assert out.dtype == np.float32
+    assert out.min() >= 0.0 and out.max() <= 1.0
+
+
+def test_anomaly_result_severity():
+    below = AnomalyResult(reconstruction_error=0.05, threshold=0.1, is_anomaly=False)
+    assert below.severity == 0.0
+
+    at_threshold = AnomalyResult(reconstruction_error=0.1, threshold=0.1, is_anomaly=False)
+    assert at_threshold.severity == pytest.approx(0.0)
+
+    double = AnomalyResult(reconstruction_error=0.2, threshold=0.1, is_anomaly=True)
+    assert double.severity == pytest.approx(1.0)
+
+
+def test_anomaly_detector_score_frame_flags_high_error():
+    torch.manual_seed(0)
+    model = SpaceAutoencoder()
+    # An untrained (random-weight) model reconstructs essentially anything
+    # poorly and consistently — enough to exercise the thresholding logic
+    # without needing a real training run in this fast unit test.
+    frame = (np.random.default_rng(1).random((64, 64, 3)) * 255).astype(np.uint8)
+    baseline_error = float(reconstruction_error(model, preprocess_frame_for_autoencoder(frame)[np.newaxis, ...])[0])
+
+    low_threshold_detector = AnomalyDetector(model=model, threshold=baseline_error - 0.01)
+    result = low_threshold_detector.score_frame(frame)
+    assert result.is_anomaly is True
+    assert result.reconstruction_error == pytest.approx(baseline_error, abs=1e-6)
+
+    high_threshold_detector = AnomalyDetector(model=model, threshold=baseline_error + 10.0)
+    assert high_threshold_detector.score_frame(frame).is_anomaly is False
+
+
+def test_anomaly_detector_save_and_load_roundtrip(tmp_path):
+    torch.manual_seed(0)
+    model = SpaceAutoencoder()
+    detector = AnomalyDetector(model=model, threshold=0.0321)
+
+    weights_path = tmp_path / "weights.pt"
+    meta_path = tmp_path / "meta.json"
+    detector.save(weights_path, meta_path)
+
+    loaded = AnomalyDetector.load(weights_path, meta_path)
+    assert loaded.threshold == pytest.approx(0.0321)
+
+    frame = (np.random.default_rng(2).random((64, 64, 3)) * 255).astype(np.uint8)
+    original_result = detector.score_frame(frame)
+    loaded_result = loaded.score_frame(frame)
+    assert loaded_result.reconstruction_error == pytest.approx(original_result.reconstruction_error, abs=1e-6)
