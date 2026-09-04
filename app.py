@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -31,6 +32,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from core.alert_store import AlertStore
+from core.conjunction_watch import screen_close_approaches
 from core.launch_window import LAUNCH_SITES, LaunchTarget
 from core.timeseries_store import TimeSeriesStore
 from core.propagator import Propagator
@@ -118,11 +121,176 @@ async def _sample_metrics_loop() -> None:
         await asyncio.sleep(TIMESERIES_SAMPLE_INTERVAL_S)
 
 
+# ---------------------------------------------------------------------------
+# Active alert layer — periodically screens real conditions (SGP4-propagated
+# close approaches to the ISS, JPL Sentry NEO risk ratings, NEO close
+# approaches) and, for the live CV stream, real anomaly detections — and
+# turns genuinely concerning ones into persisted, deduplicated AlertEvents,
+# broadcast live to any connected /ws/alerts client. This is the one part
+# of the project that's actively watching rather than only answering "what
+# is the state right now" when asked.
+# ---------------------------------------------------------------------------
+
+_alert_store = AlertStore()
+ALERT_SCAN_INTERVAL_S = 600  # 10 min — real orbital geometry/NEO catalogs don't move meaningfully faster than this
+ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL")  # optional; unset by default, no external calls unless the user configures their own
+
+_alert_websockets: set[WebSocket] = set()
+
+
+async def _broadcast_alert(event) -> None:
+    """Push one new AlertEvent to every connected /ws/alerts client, and to the optional webhook."""
+    payload = {
+        "id": event.id, "category": event.category, "severity": event.severity,
+        "title": event.title, "description": event.description,
+        "timestamp": event.timestamp.isoformat(), "metadata": event.metadata,
+    }
+    dead = []
+    for ws in list(_alert_websockets):
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _alert_websockets.discard(ws)
+
+    if ALERT_WEBHOOK_URL:
+        try:
+            await asyncio.to_thread(
+                requests.post, ALERT_WEBHOOK_URL,
+                json={"text": f"[{event.severity.upper()}] {event.title} — {event.description}", **payload},
+                timeout=10,
+            )
+        except Exception:
+            pass  # webhook delivery is best-effort; never let it break the alert pipeline
+
+
+def _record_alert(**kwargs):
+    """Sync helper (AlertStore is plain sqlite3) — call via asyncio.to_thread, then broadcast if it wasn't deduped."""
+    return _alert_store.record(**kwargs)
+
+
+async def _scan_conjunctions_once() -> None:
+    """
+    Real SGP4-propagated close-approach screening: the ISS against a
+    bounded subset of the tracked debris/active catalog (same "subset of
+    the full catalog" convention this project already uses elsewhere —
+    stm.cola, viz.dashboard_3d) over the next 24 hours.
+    """
+    try:
+        stations = await asyncio.to_thread(tle_manager.fetch_group, "stations")
+        iss = next((s for s in stations if s.norad_id == 25544), None)
+        if iss is None:
+            return
+
+        debris = await asyncio.to_thread(tle_manager.fetch_group, "debris")
+        active = await asyncio.to_thread(tle_manager.fetch_group, "active")
+        catalog = (debris + active)[:250]
+
+        events = await asyncio.to_thread(
+            screen_close_approaches, [iss], catalog, datetime.now(timezone.utc), 24.0,
+        )
+        for close_approach in events:
+            other_name = close_approach.other.name.strip()
+            recorded = await asyncio.to_thread(
+                _record_alert,
+                category="conjunction", severity=close_approach.severity,
+                title=f"Close approach: ISS & {other_name}",
+                description=(
+                    f"{other_name} (NORAD {close_approach.other.norad_id}) is predicted (real SGP4-propagated "
+                    f"TLE screening) to pass within {close_approach.min_distance_km:.2f} km of the ISS at "
+                    f"{close_approach.time_of_closest_approach.isoformat()} UTC. No covariance data is available "
+                    f"from TLEs alone, so this is a miss-distance screen, not a rigorous Pc."
+                ),
+                metadata={
+                    "watched_norad_id": close_approach.watched.norad_id,
+                    "other_norad_id": close_approach.other.norad_id,
+                    "other_name": other_name,
+                    "min_distance_km": close_approach.min_distance_km,
+                    "time_of_closest_approach": close_approach.time_of_closest_approach.isoformat(),
+                },
+                dedup_key=f"conjunction:{close_approach.watched.norad_id}:{close_approach.other.norad_id}",
+                cooldown_minutes=180.0,
+            )
+            if recorded is not None:
+                await _broadcast_alert(recorded)
+    except Exception:
+        pass
+
+
+async def _scan_neo_alerts_once() -> None:
+    """Real NEO risk (JPL Sentry) + close-approach (NeoWs) monitoring."""
+    try:
+        risky = await asyncio.to_thread(CNEOSClient().objects_above_torino, 1)
+        for obj in risky:
+            recorded = await asyncio.to_thread(
+                _record_alert,
+                category="neo_risk", severity="critical" if obj.torino_scale_max >= 5 else "warning",
+                title=f"NEO risk: {obj.full_name} (Torino {obj.torino_scale_max})",
+                description=(
+                    f"{obj.full_name} has a real JPL Sentry Torino Scale rating of "
+                    f"{obj.torino_scale_max} ({obj.torino_description}) — cumulative impact probability "
+                    f"{obj.impact_probability_cum:.2e}."
+                ),
+                metadata={
+                    "designation": obj.designation, "torino": obj.torino_scale_max,
+                    "palermo_cum": obj.palermo_scale_cum, "impact_probability_cum": obj.impact_probability_cum,
+                },
+                dedup_key=f"neo_risk:{obj.designation}",
+                cooldown_minutes=1440.0,  # Sentry ratings don't change fast — once/day is plenty
+            )
+            if recorded is not None:
+                await _broadcast_alert(recorded)
+    except Exception:
+        pass
+
+    try:
+        today = date.today()
+        objects = await asyncio.to_thread(NeoWsClient().feed, today, today + timedelta(days=1))
+        CLOSE_APPROACH_ALERT_LD = 2.0  # lunar distances — a real, commonly-used "notably close" amateur/professional threshold
+        for obj in objects:
+            for approach in obj.close_approaches:
+                if approach.orbiting_body != "Earth" or approach.miss_distance_lunar > CLOSE_APPROACH_ALERT_LD:
+                    continue
+                recorded = await asyncio.to_thread(
+                    _record_alert,
+                    category="neo_close_approach",
+                    severity="critical" if approach.miss_distance_lunar < 1.0 else "warning",
+                    title=f"NEO close approach: {obj.name}",
+                    description=(
+                        f"{obj.name} passes Earth at {approach.miss_distance_lunar:.2f} lunar distances "
+                        f"({approach.miss_distance_km:,.0f} km) on {approach.approach_date} "
+                        f"(relative velocity {approach.relative_velocity_km_s:.1f} km/s)."
+                        + (" Flagged by NASA as potentially hazardous." if obj.is_potentially_hazardous else "")
+                    ),
+                    metadata={
+                        "neo_id": obj.neo_reference_id, "miss_distance_lunar": approach.miss_distance_lunar,
+                        "miss_distance_km": approach.miss_distance_km, "approach_date": approach.approach_date,
+                        "is_potentially_hazardous": obj.is_potentially_hazardous,
+                    },
+                    dedup_key=f"neo_close_approach:{obj.neo_reference_id}:{approach.approach_date}",
+                    cooldown_minutes=1440.0,
+                )
+                if recorded is not None:
+                    await _broadcast_alert(recorded)
+    except Exception:
+        pass
+
+
+async def _alert_scan_loop() -> None:
+    while True:
+        await _scan_conjunctions_once()
+        await _scan_neo_alerts_once()
+        await asyncio.sleep(ALERT_SCAN_INTERVAL_S)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     sampler_task = asyncio.create_task(_sample_metrics_loop())
+    alert_task = asyncio.create_task(_alert_scan_loop())
     yield
     sampler_task.cancel()
+    alert_task.cancel()
 
 
 app = FastAPI(title="COSMIC OBSERVER", version="1.0.0", lifespan=_lifespan)
@@ -580,6 +748,47 @@ def timeline_page():
 
 
 # ---------------------------------------------------------------------------
+# Active alert layer API — real alert history + live push. Powers
+# static/alerts.html and the alert badge on the main dashboard.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/alerts")
+def alerts_list(limit: int = 100, category: str | None = None, unacknowledged_only: bool = False):
+    return {"alerts": _alert_store.query(limit=limit, category=category, unacknowledged_only=unacknowledged_only)}
+
+
+@app.get("/api/alerts/unacknowledged-count")
+def alerts_unacknowledged_count():
+    return {"count": _alert_store.count_unacknowledged()}
+
+
+@app.post("/api/alerts/{alert_id}/acknowledge")
+def alerts_acknowledge(alert_id: int):
+    if not _alert_store.acknowledge(alert_id):
+        raise HTTPException(404, f"Alert {alert_id} not found")
+    return {"acknowledged": True}
+
+
+@app.get("/alerts")
+def alerts_page():
+    return FileResponse(f"{STATIC_DIR}/alerts.html")
+
+
+@app.websocket("/ws/alerts")
+async def ws_alerts(websocket: WebSocket):
+    """Live push of newly-recorded alerts — see _broadcast_alert. Clients don't need to send anything; this just keeps the connection open."""
+    await websocket.accept()
+    _alert_websockets.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _alert_websockets.discard(websocket)
+
+
+# ---------------------------------------------------------------------------
 # Sensor feeds — real live/near-live telemetry and imagery from NASA/JPL/STScI
 # instruments, for the SENSOR FEEDS panel (static/cv.html). Each client
 # follows the same core.resilient_fetch pattern as everything else in this
@@ -1004,6 +1213,25 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
                         "threshold": result.anomaly.threshold,
                         "severity": result.anomaly.severity,
                     })
+                    recorded = _alert_store.record(
+                        category="anomaly",
+                        severity="critical" if result.anomaly.severity >= 1.0 else "warning",
+                        title=f"CV anomaly detected — {label}",
+                        description=(
+                            f"Live anomaly autoencoder flagged frame {result.metrics.frame_index} from {label}: "
+                            f"reconstruction error {result.anomaly.reconstruction_error:.4f} vs threshold "
+                            f"{result.anomaly.threshold:.4f} (severity {result.anomaly.severity:.2f})."
+                        ),
+                        metadata={
+                            "source": label, "frame_index": result.metrics.frame_index,
+                            "reconstruction_error": result.anomaly.reconstruction_error,
+                            "threshold": result.anomaly.threshold, "severity": result.anomaly.severity,
+                        },
+                        dedup_key=f"anomaly:{label}",
+                        cooldown_minutes=15.0,
+                    )
+                    if recorded is not None:
+                        await _broadcast_alert(recorded)
 
                 now_s = time.monotonic()
                 if now_s - last_anomaly_sample_time >= ANOMALY_SAMPLE_INTERVAL_S:

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>COSMIC OBSERVER // ALERT LAYER</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="retro.css">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--co-background);
+    color: var(--co-cyan);
+    font-family: var(--co-font);
+    overflow: hidden;
+  }
+
+  #layout {
+    position: fixed; inset: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr;
+    gap: 12px;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+
+  #title-panel { position: relative; }
+  #title-panel h1 { font-size: 18px; letter-spacing: 0.15em; margin: 0; }
+  #title-panel .subtitle { font-size: 11px; opacity: 0.7; letter-spacing: 0.1em; }
+  .nav-links { position: absolute; top: 20px; right: 20px; display: flex; gap: 8px; }
+  .nav-link {
+    font-size: 11px; color: var(--co-cyan); text-decoration: none;
+    border: 1px solid var(--co-cyan); padding: 4px 10px; letter-spacing: 0.05em;
+  }
+  .nav-link:hover { background: rgba(0,255,255,0.15); }
+
+  #status-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: stretch; }
+  .status-tile {
+    flex: 1; min-width: 150px; border: 1px solid var(--co-cyan); background: rgba(0,255,255,0.03);
+    padding: 10px 12px;
+  }
+  .status-tile .stat-name { font-size: 9px; letter-spacing: 0.06em; opacity: 0.7; text-transform: uppercase; }
+  .status-tile .stat-value { font-size: 22px; font-weight: 700; margin-top: 3px; color: var(--co-phosphor-green); }
+  .status-tile.critical .stat-value { color: #ff3355; }
+  .status-tile.warning .stat-value { color: var(--co-amber); }
+
+  #controls-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border: 1px solid var(--co-cyan); background: rgba(0,255,255,0.02); padding: 10px 12px; }
+  #controls-row label { font-size: 10px; opacity: 0.7; }
+  #controls-row select {
+    background: rgba(0,255,255,0.05); border: 1px solid var(--co-cyan); color: var(--co-cyan);
+    font-family: var(--co-font); font-size: 11px; padding: 3px 6px;
+  }
+  .co-btn {
+    background: rgba(0,255,255,0.08); border: 1px solid var(--co-cyan); color: var(--co-cyan);
+    font-family: var(--co-font); font-size: 11px; padding: 5px 10px; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .co-btn:hover { background: rgba(0,255,255,0.2); }
+  .co-btn.active { background: var(--co-cyan); color: #000; }
+  #notif-status { font-size: 9px; opacity: 0.6; margin-left: auto; }
+
+  #alert-list-container { min-height: 0; overflow-y: auto; border: 1px solid var(--co-cyan); background: rgba(0,255,255,0.02); padding: 10px; }
+  #alert-list-empty { opacity: 0.4; font-size: 12px; letter-spacing: 0.1em; text-align: center; padding: 40px; }
+
+  .alert-card {
+    border-left: 4px solid var(--co-cyan); background: rgba(0,255,255,0.04);
+    margin-bottom: 8px; padding: 8px 12px; position: relative;
+  }
+  .alert-card.severity-critical { border-left-color: #ff3355; background: rgba(255,51,85,0.06); }
+  .alert-card.severity-warning { border-left-color: var(--co-amber); background: rgba(255,204,0,0.05); }
+  .alert-card.severity-info { border-left-color: var(--co-cyan); }
+  .alert-card.acknowledged { opacity: 0.45; }
+  .alert-card.flash { animation: alert-flash 1.4s ease-out 2; }
+  @keyframes alert-flash { 0% { background: rgba(255,51,85,0.35); } 100% { background: rgba(255,51,85,0.06); } }
+
+  .alert-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .alert-title { font-size: 12px; font-weight: 700; }
+  .alert-badge { font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; padding: 1px 6px; border: 1px solid currentColor; }
+  .alert-meta { font-size: 9px; opacity: 0.55; margin-top: 2px; }
+  .alert-desc { font-size: 10.5px; margin-top: 5px; line-height: 1.5; }
+  .alert-ack-btn { margin-top: 6px; font-size: 9px; padding: 3px 8px; }
+
+  #klaxon-banner {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 9999; display: none;
+    background: rgba(120,0,20,0.92); color: #fff; text-align: center;
+    padding: 10px; font-size: 13px; letter-spacing: 0.1em; font-weight: 700;
+    border-bottom: 2px solid #ff3355;
+    animation: klaxon-pulse 1s infinite;
+  }
+  @keyframes klaxon-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.75; } }
+</style>
+</head>
+<body>
+
+<div class="co-scanlines"></div>
+<div class="co-crt-flicker"></div>
+<div id="klaxon-banner"></div>
+
+<div id="layout">
+  <div id="title-panel" class="co-panel">
+    <h1>COSMIC OBSERVER // ACTIVE ALERT LAYER</h1>
+    <div class="subtitle">REAL CONJUNCTION / ANOMALY / NEO MONITORING &middot; LIVE PUSH &middot; NOT SIMULATED</div>
+    <div class="nav-links">
+      <a class="nav-link" href="/">&larr; DASHBOARD</a>
+      <a class="nav-link" href="/cv">SENSOR FEEDS</a>
+      <a class="nav-link" href="/timeline">TRENDS</a>
+    </div>
+  </div>
+
+  <div>
+    <div id="status-row">
+      <div class="status-tile"><div class="stat-name">Total Alerts</div><div class="stat-value" id="stat-total">--</div></div>
+      <div class="status-tile"><div class="stat-name">Unacknowledged</div><div class="stat-value" id="stat-unacked">--</div></div>
+      <div class="status-tile critical"><div class="stat-name">Critical</div><div class="stat-value" id="stat-critical">--</div></div>
+      <div class="status-tile warning"><div class="stat-name">Warning</div><div class="stat-value" id="stat-warning">--</div></div>
+      <div class="status-tile"><div class="stat-name">Link Status</div><div class="stat-value" id="stat-link" style="font-size:13px;">--</div></div>
+    </div>
+    <div style="height:10px;"></div>
+    <div id="controls-row">
+      <label>CATEGORY</label>
+      <select id="filter-category">
+        <option value="">ALL</option>
+        <option value="conjunction">CONJUNCTION</option>
+        <option value="anomaly">CV ANOMALY</option>
+        <option value="neo_risk">NEO RISK</option>
+        <option value="neo_close_approach">NEO CLOSE APPROACH</option>
+      </select>
+      <label>SHOW</label>
+      <select id="filter-ack">
+        <option value="all">ALL</option>
+        <option value="unacked" selected>UNACKNOWLEDGED ONLY</option>
+      </select>
+      <button class="co-btn" id="refresh-btn">&#8635; REFRESH</button>
+      <div id="notif-status">
+        <button class="co-btn" id="notif-btn">&#128276; ENABLE BROWSER NOTIFICATIONS</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="alert-list-container">
+    <div id="alert-list-empty">NO ALERTS — SYSTEM NOMINAL</div>
+    <div id="alert-list"></div>
+  </div>
+</div>
+
+<script src="alerts.js"></script>
+</body>
+</html>

@@ -325,6 +325,31 @@ def test_timeline_page_serves_html():
     assert "TEMPORAL" in resp.text.upper()
 
 
+def test_alerts_list_returns_real_shape():
+    resp = client.get("/api/alerts")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "alerts" in data
+    assert isinstance(data["alerts"], list)
+
+
+def test_alerts_unacknowledged_count_returns_int():
+    resp = client.get("/api/alerts/unacknowledged-count")
+    assert resp.status_code == 200
+    assert isinstance(resp.json()["count"], int)
+
+
+def test_alerts_acknowledge_unknown_id_404s():
+    resp = client.post("/api/alerts/999999999/acknowledge")
+    assert resp.status_code == 404
+
+
+def test_alerts_page_serves_html():
+    resp = client.get("/alerts")
+    assert resp.status_code == 200
+    assert "ALERT" in resp.text.upper()
+
+
 def test_cv_anomaly_status_reports_real_model_state():
     resp = client.get("/api/cv/anomaly-status")
     assert resp.status_code == 200
