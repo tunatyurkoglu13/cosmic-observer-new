@@ -27,12 +27,12 @@
 
   #title-panel h1 { font-size: 18px; letter-spacing: 0.15em; margin: 0; }
   #title-panel .subtitle { font-size: 11px; opacity: 0.7; letter-spacing: 0.1em; }
-  #back-link {
-    position: absolute; top: 20px; right: 20px;
+  .nav-links { position: absolute; top: 20px; right: 20px; display: flex; gap: 8px; }
+  .nav-link {
     font-size: 11px; color: var(--co-cyan); text-decoration: none;
     border: 1px solid var(--co-cyan); padding: 4px 10px; letter-spacing: 0.05em;
   }
-  #back-link:hover { background: rgba(0,255,255,0.15); }
+  .nav-link:hover { background: rgba(0,255,255,0.15); }
 
   /* --------------------------------------------------------------- */
   /* Tab bar                                                          */
@@ -179,7 +179,10 @@
   <div id="title-panel" class="co-panel" style="position:relative;">
     <h1>COSMIC OBSERVER // SENSOR &amp; TELEMETRY NETWORK</h1>
     <div class="subtitle">LIVE INSTRUMENT FEEDS &middot; NASA / JPL / STScI / NOAA &middot; REAL DATA ONLY</div>
-    <a id="back-link" href="/">&larr; DASHBOARD</a>
+    <div class="nav-links">
+      <a class="nav-link" href="/">&larr; DASHBOARD</a>
+      <a class="nav-link" href="/timeline">&#128200; TRENDS</a>
+    </div>
   </div>
 
   <div id="tab-bar">

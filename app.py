@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.launch_window import LAUNCH_SITES, LaunchTarget
+from core.timeseries_store import TimeSeriesStore
 from core.propagator import Propagator
 from core.tle_manager import GROUPS, TLEManager
 from cv.fits_ingest import is_fits_path, load_fits_image
@@ -54,7 +57,75 @@ from reports.statistics import compute_population_statistics
 from stm.cola import build_catalog_grid, find_cola_launch_windows, screen_launch_time
 from viz.dashboard_3d import add_ground_tracks, build_snapshot, snapshot_to_dict
 
-app = FastAPI(title="COSMIC OBSERVER", version="1.0.0")
+# ---------------------------------------------------------------------------
+# Temporal layer — a background task that periodically samples a curated
+# set of real, already-existing metrics (Kp index, DSN link activity, NEO
+# risk-list size) into core.timeseries_store, so the dashboard can show
+# genuine trend history instead of only ever a live snapshot. Each
+# metric's fetch failure is isolated (a NOAA/JPL hiccup skips just that
+# one sample, not the whole loop) — same "degrade, don't crash" spirit as
+# every resilient-fetch client elsewhere in this project.
+# ---------------------------------------------------------------------------
+
+_timeseries_store = TimeSeriesStore()
+TIMESERIES_SAMPLE_INTERVAL_S = 120
+
+METRIC_DEFINITIONS: dict[str, dict] = {
+    "kp_index": {"display_name": "Kp Index (Geomagnetic Activity)", "unit": "", "color_hex": "#ffcc00"},
+    "f107_flux": {"display_name": "F10.7 Solar Radio Flux", "unit": "sfu", "color_hex": "#ff9900"},
+    "dsn_active_spacecraft": {"display_name": "DSN Active Spacecraft Links", "unit": "", "color_hex": "#00ffff"},
+    "dsn_total_downlink_mbps": {"display_name": "DSN Total Downlink Rate", "unit": "Mb/s", "color_hex": "#00ff66"},
+    "neo_risk_count": {"display_name": "NEO Sentry Risk-List Size", "unit": "objects", "color_hex": "#ff0066"},
+    "neo_max_torino": {"display_name": "NEO Max Torino Scale", "unit": "", "color_hex": "#ff3355"},
+    "cv_anomaly_score": {"display_name": "CV Live Anomaly Reconstruction Error", "unit": "", "color_hex": "#ff3355"},
+}
+
+
+async def _sample_metrics_once() -> None:
+    """One real sampling pass across the curated metric set."""
+    try:
+        snapshot = await asyncio.to_thread(fetch_current_snapshot)
+        _timeseries_store.record("kp_index", snapshot.kp_index)
+        _timeseries_store.record("f107_flux", snapshot.f107_flux)
+    except Exception:
+        pass
+
+    try:
+        dsn_status = await asyncio.to_thread(DSNClient().fetch_status)
+        active = sum(1 for d in dsn_status.dishes if any(s.active for s in d.signals))
+        total_down_bps = sum(
+            s.data_rate_bps for d in dsn_status.dishes for s in d.signals
+            if s.direction == "down" and s.active
+        )
+        _timeseries_store.record("dsn_active_spacecraft", float(active))
+        _timeseries_store.record("dsn_total_downlink_mbps", total_down_bps / 1e6)
+    except Exception:
+        pass
+
+    try:
+        objects = await asyncio.to_thread(CNEOSClient().fetch_risk_list)
+        _timeseries_store.record("neo_risk_count", float(len(objects)))
+        max_torino = max((o.torino_scale_max for o in objects), default=0)
+        _timeseries_store.record("neo_max_torino", float(max_torino))
+    except Exception:
+        pass
+
+
+async def _sample_metrics_loop() -> None:
+    while True:
+        await _sample_metrics_once()
+        await asyncio.to_thread(_timeseries_store.prune)
+        await asyncio.sleep(TIMESERIES_SAMPLE_INTERVAL_S)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    sampler_task = asyncio.create_task(_sample_metrics_loop())
+    yield
+    sampler_task.cancel()
+
+
+app = FastAPI(title="COSMIC OBSERVER", version="1.0.0", lifespan=_lifespan)
 
 tle_manager = TLEManager()
 
@@ -470,6 +541,45 @@ def space_weather():
 
 
 # ---------------------------------------------------------------------------
+# Temporal trends — real historical samples of the metrics above, recorded
+# by the background sampler (see _sample_metrics_loop) and (for CV anomaly
+# score) directly from the live /ws/cv stream. Powers static/timeline.html.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/timeseries")
+def timeseries_list():
+    """Metadata (display name, unit, color) + latest real value for every tracked metric."""
+    result = {}
+    for metric, meta in METRIC_DEFINITIONS.items():
+        latest = _timeseries_store.latest(metric)
+        result[metric] = {
+            **meta,
+            "latest_value": latest.value if latest else None,
+            "latest_timestamp": latest.timestamp.isoformat() if latest else None,
+        }
+    return result
+
+
+@app.get("/api/timeseries/{metric}")
+def timeseries_query(metric: str, hours: float = 24.0, limit: int = 2000):
+    """Real historical samples for one metric, over the last `hours` (default 24)."""
+    if metric not in METRIC_DEFINITIONS:
+        raise HTTPException(404, f"Unknown metric '{metric}'. Supported: {list(METRIC_DEFINITIONS)}")
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    samples = _timeseries_store.query(metric, since=since, limit=limit)
+    return {
+        "metric": metric,
+        "count": len(samples),
+        "samples": [{"timestamp": s.timestamp.isoformat(), "value": s.value} for s in samples],
+    }
+
+
+@app.get("/timeline")
+def timeline_page():
+    return FileResponse(f"{STATIC_DIR}/timeline.html")
+
+
+# ---------------------------------------------------------------------------
 # Sensor feeds — real live/near-live telemetry and imagery from NASA/JPL/STScI
 # instruments, for the SENSOR FEEDS panel (static/cv.html). Each client
 # follows the same core.resilient_fetch pattern as everything else in this
@@ -844,6 +954,8 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
     processor = _get_cv_processor()
     interval_s = 1.0 / target_fps if target_fps > 0 else 0.1
     is_live = label == "ISS LIVE"
+    last_anomaly_sample_time = 0.0
+    ANOMALY_SAMPLE_INTERVAL_S = 5.0  # throttled — a continuous per-frame trend, not one row per frame
 
     try:
         while True:
@@ -892,6 +1004,14 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
                         "threshold": result.anomaly.threshold,
                         "severity": result.anomaly.severity,
                     })
+
+                now_s = time.monotonic()
+                if now_s - last_anomaly_sample_time >= ANOMALY_SAMPLE_INTERVAL_S:
+                    last_anomaly_sample_time = now_s
+                    _timeseries_store.record(
+                        "cv_anomaly_score", result.anomaly.reconstruction_error,
+                        metadata={"threshold": result.anomaly.threshold, "source": label},
+                    )
 
             await websocket.send_bytes(jpeg_bytes)
             await websocket.send_json({

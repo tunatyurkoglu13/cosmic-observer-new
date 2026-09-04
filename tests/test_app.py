@@ -294,6 +294,37 @@ def test_cv_static_assets_resolve():
         assert resp.status_code == 200
 
 
+def test_timeseries_list_returns_known_metrics():
+    resp = client.get("/api/timeseries")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "kp_index" in data
+    assert "dsn_active_spacecraft" in data
+    assert "display_name" in data["kp_index"]
+    assert "unit" in data["kp_index"]
+
+
+def test_timeseries_query_unknown_metric_404s():
+    resp = client.get("/api/timeseries/not_a_real_metric")
+    assert resp.status_code == 404
+
+
+def test_timeseries_query_known_metric_shape():
+    resp = client.get("/api/timeseries/kp_index?hours=24")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["metric"] == "kp_index"
+    assert "count" in data
+    assert "samples" in data
+    assert isinstance(data["samples"], list)
+
+
+def test_timeline_page_serves_html():
+    resp = client.get("/timeline")
+    assert resp.status_code == 200
+    assert "TEMPORAL" in resp.text.upper()
+
+
 def test_cv_anomaly_status_reports_real_model_state():
     resp = client.get("/api/cv/anomaly-status")
     assert resp.status_code == 200

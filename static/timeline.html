@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>COSMIC OBSERVER // TEMPORAL TRENDS</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="retro.css">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--co-background);
+    color: var(--co-cyan);
+    font-family: var(--co-font);
+    overflow: hidden;
+  }
+
+  #layout {
+    position: fixed; inset: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr auto;
+    gap: 12px;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+
+  #title-panel { position: relative; }
+  #title-panel h1 { font-size: 18px; letter-spacing: 0.15em; margin: 0; }
+  #title-panel .subtitle { font-size: 11px; opacity: 0.7; letter-spacing: 0.1em; }
+  .nav-links { position: absolute; top: 20px; right: 20px; display: flex; gap: 8px; }
+  .nav-link {
+    font-size: 11px; color: var(--co-cyan); text-decoration: none;
+    border: 1px solid var(--co-cyan); padding: 4px 10px; letter-spacing: 0.05em;
+  }
+  .nav-link:hover { background: rgba(0,255,255,0.15); }
+
+  /* --------------------------------------------------------------- */
+  /* Stat tiles — one per tracked metric, latest value + sparkline    */
+  /* --------------------------------------------------------------- */
+  #tile-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .metric-tile {
+    flex: 1; min-width: 190px;
+    border: 1px solid var(--co-cyan); background: rgba(0,255,255,0.03);
+    padding: 10px 12px; cursor: pointer; position: relative;
+    transition: background 0.15s;
+  }
+  .metric-tile:hover { background: rgba(0,255,255,0.1); }
+  .metric-tile.focused { background: rgba(0,255,255,0.15); border-width: 2px; }
+  .metric-tile .tile-name { font-size: 9px; letter-spacing: 0.06em; opacity: 0.7; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .metric-tile .tile-value { font-size: 20px; font-weight: 700; margin: 3px 0; color: var(--co-phosphor-green); }
+  .metric-tile .tile-unit { font-size: 10px; opacity: 0.6; margin-left: 4px; }
+  .metric-tile .tile-time { font-size: 8px; opacity: 0.45; }
+  .metric-tile canvas.sparkline { display: block; width: 100%; height: 28px; margin-top: 4px; }
+  .metric-tile .tile-nodata { font-size: 9px; opacity: 0.4; margin-top: 8px; }
+
+  /* --------------------------------------------------------------- */
+  /* Main chart panel                                                  */
+  /* --------------------------------------------------------------- */
+  #chart-panel { min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--co-cyan); background: rgba(0,255,255,0.02); padding: 14px; box-sizing: border-box; }
+  #chart-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+  #chart-title { font-size: 14px; letter-spacing: 0.08em; color: var(--co-amber); }
+  #chart-title .value-now { color: var(--co-phosphor-green); margin-left: 12px; font-size: 16px; }
+  #range-buttons { display: flex; gap: 4px; }
+  .range-btn {
+    background: rgba(0,255,255,0.05); border: 1px solid var(--co-cyan); color: var(--co-cyan);
+    font-family: var(--co-font); font-size: 10px; padding: 4px 10px; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .range-btn:hover { background: rgba(0,255,255,0.15); }
+  .range-btn.active { background: var(--co-cyan); color: #000; font-weight: 700; }
+
+  #chart-container { flex: 1; min-height: 0; position: relative; }
+  #chart-canvas { width: 100%; height: 100%; display: block; }
+  #chart-tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(0,10,12,0.92); border: 1px solid var(--co-cyan);
+    padding: 4px 8px; font-size: 10px; white-space: nowrap; z-index: 5;
+  }
+  #chart-empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; opacity: 0.4; font-size: 12px; letter-spacing: 0.1em; text-align: center; }
+
+  #chart-footer { font-size: 9px; opacity: 0.5; margin-top: 8px; }
+
+  #bottom-panel { font-size: 10px; opacity: 0.6; }
+</style>
+</head>
+<body>
+
+<div class="co-scanlines"></div>
+<div class="co-crt-flicker"></div>
+
+<div id="layout">
+  <div id="title-panel" class="co-panel">
+    <h1>COSMIC OBSERVER // TEMPORAL TRENDS</h1>
+    <div class="subtitle">REAL METRIC HISTORY &middot; SAMPLED EVERY 2 MIN &middot; KP / DSN / NEO / CV ANOMALY</div>
+    <div class="nav-links">
+      <a class="nav-link" href="/">&larr; DASHBOARD</a>
+      <a class="nav-link" href="/cv">SENSOR FEEDS</a>
+    </div>
+  </div>
+
+  <div id="tile-row"></div>
+
+  <div id="chart-panel">
+    <div id="chart-header">
+      <div id="chart-title">SELECT A METRIC<span class="value-now" id="chart-value-now"></span></div>
+      <div id="range-buttons">
+        <button class="range-btn" data-hours="1">1H</button>
+        <button class="range-btn active" data-hours="6">6H</button>
+        <button class="range-btn" data-hours="24">24H</button>
+        <button class="range-btn" data-hours="168">7D</button>
+      </div>
+    </div>
+    <div id="chart-container">
+      <canvas id="chart-canvas"></canvas>
+      <div id="chart-tooltip"></div>
+      <div id="chart-empty">NO DATA YET FOR THIS RANGE — THE BACKGROUND SAMPLER RECORDS EVERY ~2 MINUTES, CHECK BACK SHORTLY</div>
+    </div>
+    <div id="chart-footer">Real samples recorded server-side by a background task — core/timeseries_store.py &middot; not simulated/interpolated</div>
+  </div>
+
+  <div id="bottom-panel" class="co-panel">
+    Kp/F10.7: NOAA SWPC &middot; DSN: eyes.nasa.gov/dsn &middot; NEO: JPL Sentry &middot; CV Anomaly: this project's own trained autoencoder (only recorded while a live stream is running)
+  </div>
+</div>
+
+<script src="timeline.js"></script>
+</body>
+</html>
