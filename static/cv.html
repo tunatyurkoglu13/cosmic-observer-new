@@ -219,9 +219,28 @@
             <label>UPLOAD</label>
             <input type="file" id="cv-file" accept="video/*" />
           </div>
+          <div class="co-row">
+            <label>MODEL</label>
+            <select id="cv-model">
+              <option value="coco" selected>COCO (general objects)</option>
+              <option value="space">SPACE FINE-TUNE (experimental)</option>
+            </select>
+          </div>
           <button class="co-btn" id="cv-upload-btn">UPLOAD VIDEO</button>
           <button class="co-btn" id="cv-start-btn">&#9654; START STREAM</button>
           <div id="cv-status" class="dim"></div>
+        </div>
+
+        <div id="space-model-panel" class="co-panel">
+          <h3>SPACE FINE-TUNE</h3>
+          <table class="telemetry-table">
+            <tr><td>STATUS</td><td class="value" id="space-model-status">--</td></tr>
+            <tr><td>CLASSES</td><td class="value" id="space-model-classes">--</td></tr>
+            <tr><td>TRAIN/VAL IMAGES</td><td class="value" id="space-model-images">--</td></tr>
+            <tr><td>mAP50</td><td class="value" id="space-model-map50">--</td></tr>
+            <tr><td>mAP50-95</td><td class="value" id="space-model-map5095">--</td></tr>
+          </table>
+          <div class="dim" style="margin-top:6px;font-size:9px;">Real YOLOv8 fine-tune (cv/detector_train.py) on real NASA imagery, zero-shot-labeled (OWL-ViT draft boxes, not human-verified) — a small, honestly-disclosed bootstrap, not an academic-grade dataset.</div>
         </div>
 
         <div id="identify-panel" class="co-panel">

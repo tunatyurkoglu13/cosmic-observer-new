@@ -156,14 +156,15 @@ function startStream() {
   }
 
   const source = document.getElementById('cv-source').value;
+  const model = document.getElementById('cv-model').value;
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${window.location.host}/ws/cv?source=${encodeURIComponent(source)}`;
+  const url = `${proto}//${window.location.host}/ws/cv?source=${encodeURIComponent(source)}&model=${encodeURIComponent(model)}`;
 
   ws = new WebSocket(url);
   ws.binaryType = 'blob';
 
   ws.onopen = () => {
-    setStatus(`CONNECTED — SOURCE: ${source.toUpperCase()}`);
+    setStatus(`CONNECTED — SOURCE: ${source.toUpperCase()} — MODEL: ${model.toUpperCase()}`);
     startBtn.textContent = '■ STOP STREAM';
     startBtn.classList.add('active');
     placeholder.style.display = 'none';
@@ -392,6 +393,41 @@ async function loadAnomalyEventLog() {
 loadAnomalyModelStatus();
 loadAnomalyEventLog();
 setInterval(loadAnomalyEventLog, 10000);
+
+// ---------------------------------------------------------------------
+// Space-domain YOLOv8 fine-tune (cv/detector_train.py)
+// ---------------------------------------------------------------------
+
+async function loadSpaceModelStatus() {
+  const statusEl = document.getElementById('space-model-status');
+  const classesEl = document.getElementById('space-model-classes');
+  const imagesEl = document.getElementById('space-model-images');
+  const map50El = document.getElementById('space-model-map50');
+  const map5095El = document.getElementById('space-model-map5095');
+  try {
+    const data = await fetchJson('/api/cv/space-model-status');
+    if (!data.available) {
+      statusEl.textContent = 'NOT TRAINED';
+      statusEl.className = 'hud-signal-degraded';
+      classesEl.textContent = '--';
+      imagesEl.textContent = '--';
+      map50El.textContent = '--';
+      map5095El.textContent = '--';
+      return;
+    }
+    statusEl.textContent = 'TRAINED';
+    statusEl.className = 'hud-signal-optimal';
+    classesEl.textContent = (data.classes || []).join(', ');
+    imagesEl.textContent = `${data.n_train_images ?? '--'} / ${data.n_val_images ?? '--'}`;
+    const metrics = data.final_metrics || {};
+    map50El.textContent = metrics.mAP50 != null ? metrics.mAP50.toFixed(3) : '--';
+    map5095El.textContent = metrics['mAP50-95'] != null ? metrics['mAP50-95'].toFixed(3) : '--';
+  } catch (err) {
+    statusEl.textContent = 'UNKNOWN';
+  }
+}
+
+loadSpaceModelStatus();
 
 // ===========================================================================
 // Tab: DSN NOW — NASA Deep Space Network live dish status.

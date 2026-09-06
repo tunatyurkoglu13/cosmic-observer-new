@@ -373,6 +373,21 @@ def test_cv_anomaly_log_returns_real_shape():
     assert isinstance(data["events"], list)
 
 
+def test_cv_space_model_status_reports_real_state():
+    resp = client.get("/api/cv/space-model-status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "available" in data
+    # This project's own real fine-tune (cv.detector_train) is present in
+    # this dev environment, so real training metadata is expected — but
+    # the endpoint itself must not error either way if it's absent.
+    if data["available"]:
+        assert data["classes"]
+        assert isinstance(data["final_metrics"]["mAP50"], float)
+    else:
+        assert set(data.keys()) == {"available"}
+
+
 def test_cv_upload_rejects_non_video_content_type():
     resp = client.post(
         "/api/cv/upload",

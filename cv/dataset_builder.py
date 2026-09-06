@@ -85,6 +85,7 @@ def auto_label_with_zero_shot(
     text_queries: list[str] | None = None,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     confidence_threshold: float = 0.1,
+    query_class_map: dict[str, str] | None = None,
 ) -> list[Path]:
     """
     Generate DRAFT YOLO-format label files for a set of images using the
@@ -103,6 +104,14 @@ def auto_label_with_zero_shot(
             appending any query not already in SPACE_CLASSES.
         output_dir: writes label files to <output_dir>/labels/train/.
         confidence_threshold: passed through to the zero-shot detector.
+        query_class_map: optional {query text -> class name} remapping.
+            OWL-ViT matches noticeably better against natural-language
+            phrases ("the International Space Station") than bare class
+            nouns ("iss"), but the training class list still needs to be
+            the short SPACE_CLASSES names. When given, a query's detected
+            boxes are filed under `query_class_map[query]` instead of the
+            literal query text. Defaults to None (query text IS the class
+            name — original behavior, unchanged).
 
     Returns:
         List of paths to the written label files.
@@ -112,10 +121,12 @@ def auto_label_with_zero_shot(
     labels_dir.mkdir(parents=True, exist_ok=True)
 
     queries = text_queries or SPACE_CLASSES
+    query_class_map = query_class_map or {}
     class_list = list(SPACE_CLASSES)
     for q in queries:
-        if q not in class_list:
-            class_list.append(q)
+        mapped = query_class_map.get(q, q)
+        if mapped not in class_list:
+            class_list.append(mapped)
 
     detector = OpenVocabularyDetector()
     label_paths = []
@@ -130,7 +141,7 @@ def auto_label_with_zero_shot(
 
         lines = []
         for det in detections:
-            class_id = class_list.index(det.class_name)
+            class_id = class_list.index(query_class_map.get(det.class_name, det.class_name))
             x1, y1, x2, y2 = det.box_xyxy
             x_center = ((x1 + x2) / 2) / w
             y_center = ((y1 + y2) / 2) / h

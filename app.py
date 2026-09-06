@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import time
 from collections import deque
@@ -43,7 +44,7 @@ from cv.hud import draw_label, draw_reticle
 from cv.iss_live import resolve_iss_stream_url
 from cv.open_vocabulary import DEFAULT_SPACE_QUERIES, OpenVocabularyDetector
 from cv.streak_detection import draw_streaks, detect_streaks
-from cv.streamer import FrameProcessor, build_sample_video, encode_jpeg
+from cv.streamer import SPACE_FINE_TUNED_WEIGHTS_PATH, FrameProcessor, build_sample_video, encode_jpeg
 from data.dscovr_epic import EPICClient
 from data.dsn import DSNClient
 from data.mars_rover_photos import ROVERS as MARS_ROVERS, MarsRoverPhotosClient
@@ -928,7 +929,7 @@ async def ws_positions(websocket: WebSocket, group: str = "stations", interval_s
 # main dashboard's /ws/positions.
 # ---------------------------------------------------------------------------
 
-_cv_processor: FrameProcessor | None = None
+_cv_processors: dict[str, FrameProcessor] = {}
 _cv_upload_state: dict[str, Path] = {}
 
 # In-memory anomaly event log — a lightweight, deliberately simple
@@ -940,12 +941,26 @@ _cv_upload_state: dict[str, Path] = {}
 _anomaly_log: deque[dict] = deque(maxlen=200)
 
 
-def _get_cv_processor() -> FrameProcessor:
-    """Lazily instantiate the YOLO-backed processor once (loading weights is expensive; don't do it at import time)."""
-    global _cv_processor
-    if _cv_processor is None:
-        _cv_processor = FrameProcessor()
-    return _cv_processor
+def _get_cv_processor(model: str = "coco") -> FrameProcessor:
+    """
+    Lazily instantiate (and cache) a YOLO-backed processor for the
+    requested model choice — loading weights is expensive, so each
+    variant is built once and reused.
+
+    Args:
+        model: "coco" (default) — stock COCO-pretrained yolov8n.pt,
+            general-purpose classes (person, bus, etc.). "space" — this
+            project's own real fine-tune (cv.detector_train) on
+            zero-shot-labeled real NASA imagery; falls back to "coco"
+            with a disclosed notice if that checkpoint hasn't been
+            produced yet (see cv.streamer.SPACE_FINE_TUNED_WEIGHTS_PATH).
+    """
+    if model == "space" and not SPACE_FINE_TUNED_WEIGHTS_PATH.exists():
+        model = "coco"
+    if model not in _cv_processors:
+        weights = str(SPACE_FINE_TUNED_WEIGHTS_PATH) if model == "space" else "yolov8n.pt"
+        _cv_processors[model] = FrameProcessor(weights=weights)
+    return _cv_processors[model]
 
 
 _open_vocab_detector: OpenVocabularyDetector | None = None
@@ -971,6 +986,23 @@ def cv_anomaly_status():
     if processor.anomaly_detector is None:
         return {"model_loaded": False, "threshold": None}
     return {"model_loaded": True, "threshold": processor.anomaly_detector.threshold}
+
+
+@app.get("/api/cv/space-model-status")
+def cv_space_model_status():
+    """
+    Whether this project's own real YOLOv8 space-domain fine-tune
+    (cv.detector_train) has been trained, and if so its honest training
+    metadata (dataset size, class list, real held-out mAP/precision/recall
+    from the training run — see models/space_yolov8_meta.json).
+    """
+    if not SPACE_FINE_TUNED_WEIGHTS_PATH.exists():
+        return {"available": False}
+    meta = {}
+    from cv.detector_train import FINE_TUNED_META_PATH
+    if FINE_TUNED_META_PATH.exists():
+        meta = json.loads(FINE_TUNED_META_PATH.read_text())
+    return {"available": True, **meta}
 
 
 @app.get("/api/cv/anomaly-log")
@@ -1126,7 +1158,7 @@ async def _open_video_capture(source: str) -> tuple[cv2.VideoCapture | None, str
 
 
 @app.websocket("/ws/cv")
-async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float = 8.0):
+async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float = 8.0, model: str = "coco"):
     """
     Stream HUD-annotated, YOLOv8-detected frames from a video source.
 
@@ -1145,6 +1177,12 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
             cv.iss_live — falls back to "sample" with a disclosed notice
             if the live feed is unreachable).
         target_fps: pacing cap for the stream.
+        model: "coco" (default, stock general-purpose classes) or
+            "space" (this project's own real YOLOv8 fine-tune —
+            cv.detector_train — trained on zero-shot-labeled real NASA
+            imagery; a small, honestly-disclosed bootstrap dataset, not
+            an academic-grade one). Falls back to "coco" with a
+            disclosed notice if the fine-tuned checkpoint doesn't exist.
     """
     await websocket.accept()
 
@@ -1159,8 +1197,13 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
         # We got a stream, but not the one requested (e.g. ISS live
         # unreachable -> sample clip) — disclose it, but keep streaming.
         await websocket.send_json({"notice": notice})
+    if model == "space" and not SPACE_FINE_TUNED_WEIGHTS_PATH.exists():
+        await websocket.send_json({
+            "notice": "Space fine-tune requested but no trained checkpoint found "
+                      "(run `python -m cv.detector_train` first) — using stock COCO model instead."
+        })
 
-    processor = _get_cv_processor()
+    processor = _get_cv_processor(model=model)
     interval_s = 1.0 / target_fps if target_fps > 0 else 0.1
     is_live = label == "ISS LIVE"
     last_anomaly_sample_time = 0.0

@@ -38,6 +38,13 @@ SAMPLE_VIDEO_PATH = Path(__file__).resolve().parent.parent / "static" / "cv_samp
 ANOMALY_WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "models" / "anomaly_autoencoder.pt"
 ANOMALY_META_PATH = Path(__file__).resolve().parent.parent / "models" / "anomaly_meta.json"
 
+# Real fine-tuned checkpoint from cv.detector_train (see that module's
+# docstring for the honest bootstrap-dataset disclosure: zero-shot-labeled
+# real NASA imagery, not human-verified ground truth). Optional — the live
+# stream falls back to stock COCO-pretrained yolov8n.pt if this hasn't
+# been produced yet by running `python -m cv.detector_train`.
+SPACE_FINE_TUNED_WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "models" / "space_yolov8.pt"
+
 
 @dataclass
 class ProcessedFrame:
