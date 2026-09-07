@@ -303,6 +303,13 @@ STATIC_DIR = str(BASE_DIR / "static")
 CV_UPLOAD_DIR = BASE_DIR / "data" / "cv_uploads"
 
 
+@app.get("/healthz")
+def healthz():
+    """Liveness probe for Docker HEALTHCHECK / CI smoke tests — deliberately
+    just process-alive, not a check of every external data source."""
+    return {"status": "ok"}
+
+
 def _safe_fetch_group(group: str, limit: int | None = None) -> list:
     """
     tle_manager.fetch_group(), but converted into clean HTTP errors instead

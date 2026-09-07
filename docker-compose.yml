@@ -1,0 +1,15 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Trained model weights and SQLite caches/alert store are runtime
+      # state, not part of the image — keeping them on the host means they
+      # survive `docker compose down`/rebuilds instead of resetting.
+      - ./models:/app/models
+      - ./data/cache:/app/data/cache
+    restart: unless-stopped

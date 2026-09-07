@@ -15,6 +15,12 @@ def test_index_serves_dashboard_html():
     assert "COSMIC OBSERVER" in resp.text
 
 
+def test_healthz_returns_ok():
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
 def test_static_assets_resolve_at_root_relative_paths():
     # index.html references these with relative (no-leading-slash) paths,
     # so they must resolve at the root, not under /static/.
