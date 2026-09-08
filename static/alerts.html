@@ -89,6 +89,25 @@
     animation: klaxon-pulse 1s infinite;
   }
   @keyframes klaxon-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.75; } }
+
+  /* ------------------------------------------------------------------ */
+  /* Mobile: desktop is a fixed, non-scrolling viewport (a 1fr grid row  */
+  /* makes the alert list fill exactly the remaining space). Below this  */
+  /* width the page scrolls normally instead.                            */
+  /* ------------------------------------------------------------------ */
+  @media (max-width: 860px) {
+    html, body { overflow-y: auto; overflow-x: hidden; height: auto; }
+    #layout { position: static; height: auto; grid-template-rows: auto auto auto; }
+
+    #title-panel { padding-right: 16px; }
+    .nav-links { position: static; margin-top: 10px; flex-wrap: wrap; }
+    .nav-link, .co-btn { min-height: 40px; display: inline-flex; align-items: center; }
+
+    .status-tile { flex-basis: 45%; min-width: 130px; }
+    #notif-status { margin-left: 0; width: 100%; }
+
+    #alert-list-container { max-height: none; overflow-y: visible; }
+  }
 </style>
 </head>
 <body>

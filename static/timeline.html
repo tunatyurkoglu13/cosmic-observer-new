@@ -82,6 +82,27 @@
   #chart-footer { font-size: 9px; opacity: 0.5; margin-top: 8px; }
 
   #bottom-panel { font-size: 10px; opacity: 0.6; }
+
+  /* ------------------------------------------------------------------ */
+  /* Mobile: desktop is a fixed, non-scrolling viewport (a 1fr grid row  */
+  /* makes the chart fill exactly the remaining space). Below this width */
+  /* the page scrolls normally and the chart gets a fixed height instead */
+  /* of flex-filling an undefined amount of space.                       */
+  /* ------------------------------------------------------------------ */
+  @media (max-width: 860px) {
+    html, body { overflow-y: auto; overflow-x: hidden; height: auto; }
+    #layout { position: static; height: auto; grid-template-rows: auto auto auto auto; }
+
+    #title-panel { padding-right: 16px; }
+    .nav-links { position: static; margin-top: 10px; flex-wrap: wrap; }
+    .nav-link { min-height: 40px; display: inline-flex; align-items: center; }
+
+    .metric-tile { flex-basis: 100%; min-width: 0; }
+
+    #chart-panel { min-height: auto; }
+    #chart-container { flex: none; height: 300px; }
+    .range-btn { min-height: 36px; }
+  }
 </style>
 </head>
 <body>

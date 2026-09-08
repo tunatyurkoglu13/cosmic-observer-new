@@ -266,14 +266,21 @@ class Dashboard {
   }
 
   _initScene() {
+    // Sized off the container's own box (not window.innerWidth/innerHeight)
+    // so this keeps working correctly when #scene-container isn't the full
+    // viewport — e.g. the responsive mobile layout, where it shrinks to a
+    // fixed-height section above the stacked HUD panels instead of filling
+    // the screen.
     const container = document.getElementById('scene-container');
+    this.container = container;
     this.scene = new THREE.Scene();
 
-    this.camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const { width, height } = this._viewportSize();
+    this.camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
     this.camera.position.set(0, 5, 12);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.appendChild(this.renderer.domElement);
 
@@ -307,13 +314,20 @@ class Dashboard {
     this._buildReferenceGrid();
     this._initPostProcessing();
 
-    window.addEventListener('resize', () => {
-      this.camera.aspect = window.innerWidth / window.innerHeight;
-      this.camera.updateProjectionMatrix();
-      this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.composer.setSize(window.innerWidth, window.innerHeight);
-      this.bloomPass.setSize(window.innerWidth, window.innerHeight);
-    });
+    window.addEventListener('resize', () => this._onResize());
+  }
+
+  _viewportSize() {
+    return { width: this.container.clientWidth, height: this.container.clientHeight };
+  }
+
+  _onResize() {
+    const { width, height } = this._viewportSize();
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+    this.composer.setSize(width, height);
+    this.bloomPass.setSize(width, height);
   }
 
   _initPostProcessing() {
@@ -322,10 +336,11 @@ class Dashboard {
     // blowing out the whole scene. Threshold kept low so even
     // moderately bright cyan lines catch it (their fresnel rim term
     // deliberately pushes color values past 1.0 for exactly this).
+    const { width, height } = this._viewportSize();
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      new THREE.Vector2(width, height),
       0.32,  // strength
       0.28,  // radius
       0.4,   // threshold
@@ -512,8 +527,9 @@ class Dashboard {
         continue;
       }
       label.el.style.display = 'block';
-      const x = (v.x * 0.5 + 0.5) * window.innerWidth;
-      const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+      const { width, height } = this._viewportSize();
+      const x = (v.x * 0.5 + 0.5) * width;
+      const y = (-v.y * 0.5 + 0.5) * height;
       label.el.style.left = `${x}px`;
       label.el.style.top = `${y}px`;
       label.el.classList.toggle('focused', label.key === this.focusedBodyKey);

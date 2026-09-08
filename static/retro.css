@@ -58,3 +58,15 @@
   letter-spacing: 0.08em;
   margin: 0 0 8px 0;
 }
+
+/* Shared mobile baseline every page picks up automatically via this
+   stylesheet — bigger touch targets for buttons/links (each page's own
+   @media block still lays out its specific grids/panels, this only
+   raises the floor on tap-target size wherever a .co-btn/.nav-link
+   exists, without needing every page to repeat it). */
+@media (max-width: 860px) {
+  .co-btn, .nav-link {
+    min-height: 40px;
+    box-sizing: border-box;
+  }
+}
