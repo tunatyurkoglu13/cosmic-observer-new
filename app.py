@@ -28,10 +28,10 @@ from pathlib import Path
 
 import cv2
 import requests
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.alert_store import AlertStore
 from core.conjunction_watch import screen_close_approaches
@@ -294,7 +294,54 @@ async def _lifespan(app: FastAPI):
     alert_task.cancel()
 
 
+# ---------------------------------------------------------------------------
+# Public-deployment hardening. PUBLIC_DEMO=1 (set on the hosted demo, unset
+# for local dev) turns the app into a read-only showcase: anything that lets
+# one visitor change what every other visitor sees (shared video upload,
+# alert acknowledgement) is disabled. The size/concurrency caps below apply
+# in every mode — they only bound abuse, never normal use.
+# ---------------------------------------------------------------------------
+
+PUBLIC_DEMO = os.environ.get("PUBLIC_DEMO", "").lower() in ("1", "true", "yes")
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024      # /api/cv/upload video
+MAX_IDENTIFY_BYTES = 15 * 1024 * 1024    # /api/cv/identify image
+MAX_QUERY_LIMIT = 5000                   # cap for every ?limit= style parameter
+MAX_CV_STREAMS = int(os.environ.get("MAX_CV_STREAMS", "4"))
+MAX_CV_FPS = 15.0
+
+_cv_stream_slots = asyncio.Semaphore(MAX_CV_STREAMS)
+_identify_slots = asyncio.Semaphore(2)
+
+
+def _require_writable() -> None:
+    if PUBLIC_DEMO:
+        raise HTTPException(403, "Disabled on the public read-only demo.")
+
+
+def _clamp_limit(limit: int) -> int:
+    return max(1, min(limit, MAX_QUERY_LIMIT))
+
+
+async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
+    contents = await file.read(max_bytes + 1)
+    if len(contents) > max_bytes:
+        raise HTTPException(413, f"File too large (max {max_bytes // (1024 * 1024)} MB).")
+    return contents
+
+
 app = FastAPI(title="COSMIC OBSERVER", version="1.0.0", lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    # Hugging Face renders a Space inside an iframe on huggingface.co, so
+    # framing is allowed there and nowhere else (anti-clickjacking).
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self' https://huggingface.co")
+    return response
 
 tle_manager = TLEManager()
 
@@ -335,7 +382,7 @@ def _safe_fetch_group(group: str, limit: int | None = None) -> list:
         )
     except RuntimeError as e:
         raise HTTPException(502, f"CelesTrak returned an unexpected response for group '{group}': {e}")
-    return satellites[:limit] if limit is not None else satellites
+    return satellites[:_clamp_limit(limit)] if limit is not None else satellites
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +462,8 @@ class LaunchWindowRequest(BaseModel):
 def launch_windows(req: LaunchWindowRequest):
     if req.site not in LAUNCH_SITES:
         raise HTTPException(400, f"Unknown site '{req.site}'. Valid sites: {list(LAUNCH_SITES)}")
+    if req.end - req.start > MAX_LAUNCH_WINDOW_SPAN:
+        raise HTTPException(400, f"Search window too large (max {MAX_LAUNCH_WINDOW_SPAN.days} days).")
 
     site = LAUNCH_SITES[req.site]
     target = LaunchTarget(
@@ -443,13 +492,17 @@ class COLAScanRequest(BaseModel):
     target_altitude_km: float = 400.0
     search_start: datetime
     search_end: datetime
-    candidate_step_minutes: float = 1.0
-    ascent_duration_s: float = 600.0
+    candidate_step_minutes: float = Field(1.0, ge=0.5)
+    ascent_duration_s: float = Field(600.0, gt=0, le=3600)
     max_downrange_km: float = 2000.0
     bubble_radius_km: float = 50.0
     direction: str = "northeast"
-    catalog_groups: list[str] = ["stations", "visual"]
-    catalog_limit_per_group: int = 150
+    catalog_groups: list[str] = Field(["stations", "visual"], max_length=4)
+    catalog_limit_per_group: int = Field(150, ge=1, le=500)
+
+
+MAX_COLA_CANDIDATES = 500
+MAX_LAUNCH_WINDOW_SPAN = timedelta(days=31)
 
 
 def _fetch_cola_catalog(groups: list[str], limit_per_group: int):
@@ -488,6 +541,10 @@ def cola_scan(req: COLAScanRequest):
     """
     if req.site not in LAUNCH_SITES:
         raise HTTPException(400, f"Unknown site '{req.site}'. Valid sites: {list(LAUNCH_SITES)}")
+
+    n_candidates = (req.search_end - req.search_start) / timedelta(minutes=req.candidate_step_minutes)
+    if n_candidates > MAX_COLA_CANDIDATES:
+        raise HTTPException(400, f"Search window too large: at most {MAX_COLA_CANDIDATES} candidate launch times per scan.")
 
     site = LAUNCH_SITES[req.site]
     catalog = _fetch_cola_catalog(req.catalog_groups, req.catalog_limit_per_group)
@@ -532,12 +589,12 @@ class COLATrajectoryRequest(BaseModel):
     target_inclination_deg: float
     target_altitude_km: float = 400.0
     launch_time: datetime
-    ascent_duration_s: float = 600.0
+    ascent_duration_s: float = Field(600.0, gt=0, le=3600)
     max_downrange_km: float = 2000.0
     bubble_radius_km: float = 50.0
     direction: str = "northeast"
-    catalog_groups: list[str] = ["stations", "visual"]
-    catalog_limit_per_group: int = 150
+    catalog_groups: list[str] = Field(["stations", "visual"], max_length=4)
+    catalog_limit_per_group: int = Field(150, ge=1, le=500)
 
 
 @app.post("/api/cola/trajectory")
@@ -742,7 +799,7 @@ def timeseries_query(metric: str, hours: float = 24.0, limit: int = 2000):
     if metric not in METRIC_DEFINITIONS:
         raise HTTPException(404, f"Unknown metric '{metric}'. Supported: {list(METRIC_DEFINITIONS)}")
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    samples = _timeseries_store.query(metric, since=since, limit=limit)
+    samples = _timeseries_store.query(metric, since=since, limit=_clamp_limit(limit))
     return {
         "metric": metric,
         "count": len(samples),
@@ -762,7 +819,7 @@ def timeline_page():
 
 @app.get("/api/alerts")
 def alerts_list(limit: int = 100, category: str | None = None, unacknowledged_only: bool = False):
-    return {"alerts": _alert_store.query(limit=limit, category=category, unacknowledged_only=unacknowledged_only)}
+    return {"alerts": _alert_store.query(limit=_clamp_limit(limit), category=category, unacknowledged_only=unacknowledged_only)}
 
 
 @app.get("/api/alerts/unacknowledged-count")
@@ -772,6 +829,7 @@ def alerts_unacknowledged_count():
 
 @app.post("/api/alerts/{alert_id}/acknowledge")
 def alerts_acknowledge(alert_id: int):
+    _require_writable()
     if not _alert_store.acknowledge(alert_id):
         raise HTTPException(404, f"Alert {alert_id} not found")
     return {"acknowledged": True}
@@ -874,6 +932,7 @@ def dashboard_snapshot(active_group: str = "visual", active_limit: int = 200, fr
     active = _safe_fetch_group(active_group, active_limit)
 
     epoch = datetime.now(timezone.utc)
+    frames = max(1, min(frames, 72))
     snapshot = build_snapshot(stations + active, epoch, n_frames=frames, frame_step=timedelta(hours=step_hours))
     add_ground_tracks(snapshot, stations, epoch)
     return snapshot_to_dict(snapshot)
@@ -899,6 +958,7 @@ async def ws_positions(websocket: WebSocket, group: str = "stations", interval_s
         await websocket.send_json({"error": f"Unknown group '{group}'"})
         await websocket.close()
         return
+    interval_seconds = max(interval_seconds, 1.0)
 
     try:
         while True:
@@ -1015,7 +1075,7 @@ def cv_space_model_status():
 @app.get("/api/cv/anomaly-log")
 def cv_anomaly_log(limit: int = 50):
     """Recent real anomaly events flagged by the live stream (in-memory, resets on server restart)."""
-    events = list(_anomaly_log)[-limit:]
+    events = list(_anomaly_log)[-_clamp_limit(limit):]
     events.reverse()  # most recent first
     return {"count": len(events), "events": events}
 
@@ -1023,12 +1083,16 @@ def cv_anomaly_log(limit: int = 50):
 @app.post("/api/cv/upload")
 async def cv_upload(file: UploadFile = File(...)):
     """Upload a video file to use as the /ws/cv?source=upload frame source."""
+    _require_writable()
     if file.content_type and not file.content_type.startswith("video/"):
         raise HTTPException(400, f"Expected a video file, got content-type '{file.content_type}'")
 
     CV_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = CV_UPLOAD_DIR / (file.filename or "upload.mp4")
-    contents = await file.read()
+    # Never trust the client's filename as a path — "../../app.py" would
+    # otherwise write outside the upload directory.
+    suffix = Path(file.filename or "").suffix.lower()
+    dest = CV_UPLOAD_DIR / f"upload{suffix if suffix.isascii() and len(suffix) <= 6 else '.mp4'}"
+    contents = await _read_capped(file, MAX_UPLOAD_BYTES)
     dest.write_bytes(contents)
     _cv_upload_state["path"] = dest
 
@@ -1056,8 +1120,17 @@ async def cv_identify(file: UploadFile = File(...), text_queries: str = Form("")
             "satellite, solar panel, asteroid"); if empty, uses
             cv.open_vocabulary.DEFAULT_SPACE_QUERIES.
     """
-    suffix = Path(file.filename or "upload.jpg").suffix
-    contents = await file.read()
+    suffix = Path(file.filename or "upload.jpg").suffix.lower()
+    if not (suffix.isascii() and len(suffix) <= 6):
+        suffix = ".jpg"
+    contents = await _read_capped(file, MAX_IDENTIFY_BYTES)
+    if _identify_slots.locked():
+        raise HTTPException(429, "Image analysis is busy — please try again in a few seconds.")
+    async with _identify_slots:
+        return await _identify_image(contents, suffix, text_queries)
+
+
+async def _identify_image(contents: bytes, suffix: str, text_queries: str) -> dict:
 
     CV_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     temp_path = CV_UPLOAD_DIR / f"identify_{int(datetime.now().timestamp())}{suffix}"
@@ -1192,7 +1265,19 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
             disclosed notice if the fine-tuned checkpoint doesn't exist.
     """
     await websocket.accept()
+    if source == "upload" and PUBLIC_DEMO:
+        await websocket.send_json({"error": "Video upload is disabled on the public demo — use the sample or ISS live source."})
+        await websocket.close()
+        return
+    if _cv_stream_slots.locked():
+        await websocket.send_json({"error": "All live CV stream slots are busy — please try again in a minute."})
+        await websocket.close()
+        return
+    async with _cv_stream_slots:
+        await _run_cv_stream(websocket, source, target_fps, model)
 
+
+async def _run_cv_stream(websocket: WebSocket, source: str, target_fps: float, model: str) -> None:
     cap, label, notice = await _open_video_capture(source)
     if cap is None:
         # Nothing playable at all (e.g. no upload yet) — this is a hard
@@ -1211,6 +1296,7 @@ async def ws_cv(websocket: WebSocket, source: str = "sample", target_fps: float 
         })
 
     processor = _get_cv_processor(model=model)
+    target_fps = min(target_fps, MAX_CV_FPS)
     interval_s = 1.0 / target_fps if target_fps > 0 else 0.1
     is_live = label == "ISS LIVE"
     last_anomaly_sample_time = 0.0

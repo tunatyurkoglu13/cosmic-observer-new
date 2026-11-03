@@ -6,6 +6,8 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      PUBLIC_DEMO: "0"  # local use: allow video upload / alert acknowledgement
     volumes:
       # Trained model weights and SQLite caches/alert store are runtime
       # state, not part of the image — keeping them on the host means they

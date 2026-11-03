@@ -452,7 +452,7 @@ def test_cv_upload_accepts_video_file(tmp_path):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["filename"] == "test_clip.mp4"
+    assert data["filename"] == "upload.mp4"
     assert data["size_bytes"] == len(fake_video_bytes)
 
 
@@ -517,3 +517,43 @@ def test_ws_cv_upload_source_without_upload_returns_error():
     with client.websocket_connect("/ws/cv?source=upload") as ws:
         message = ws.receive_json()
         assert "error" in message
+
+
+def test_cv_upload_ignores_path_traversal_in_filename():
+    resp = client.post(
+        "/api/cv/upload",
+        files={"file": ("../../evil.mp4", b"\x00" * 16, "video/mp4")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["filename"] == "upload.mp4"
+    assert (app_module.CV_UPLOAD_DIR / "upload.mp4").exists()
+    assert not (app_module.BASE_DIR.parent / "evil.mp4").exists()
+
+
+def test_cv_upload_rejects_oversized_file():
+    with patch.object(app_module, "MAX_UPLOAD_BYTES", 10):
+        resp = client.post("/api/cv/upload", files={"file": ("a.mp4", b"\x00" * 11, "video/mp4")})
+    assert resp.status_code == 413
+
+
+def test_public_demo_disables_shared_writes():
+    with patch.object(app_module, "PUBLIC_DEMO", True):
+        assert client.post("/api/cv/upload", files={"file": ("a.mp4", b"\x00", "video/mp4")}).status_code == 403
+        assert client.post("/api/alerts/1/acknowledge").status_code == 403
+        with client.websocket_connect("/ws/cv?source=upload") as ws:
+            assert "disabled" in ws.receive_json()["error"]
+
+
+def test_security_headers_present():
+    resp = client.get("/healthz")
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert "frame-ancestors" in resp.headers["Content-Security-Policy"]
+
+
+def test_cola_scan_rejects_oversized_search_window():
+    resp = client.post("/api/cola/scan", json={
+        "site": next(iter(app_module.LAUNCH_SITES)), "target_inclination_deg": 51.6,
+        "search_start": "2026-01-01T00:00:00Z", "search_end": "2026-02-01T00:00:00Z",
+        "candidate_step_minutes": 1,
+    })
+    assert resp.status_code == 400

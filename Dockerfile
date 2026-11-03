@@ -52,9 +52,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --create-home --shell /usr/sbin/nologin app
 
 COPY --from=builder /opt/venv /opt/venv
+# PUBLIC_DEMO=1: any deployed image is a read-only showcase by default
+# (see app.py's public-deployment hardening). docker-compose.yml turns it
+# off for local use.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PUBLIC_DEMO=1
 
 WORKDIR /app
 COPY app.py .
