@@ -1,10 +1,16 @@
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 
 from data.space_weather import (
+    SWPC_KP_1M_URL,
+    SWPC_KP_3H_URL,
     atmospheric_density,
     drag_acceleration,
     fetch_current_snapshot,
+    fetch_f107_history,
+    fetch_kp_history,
 )
 
 
@@ -64,3 +70,37 @@ def test_fetch_current_snapshot_live():
     snapshot = fetch_current_snapshot()
     assert 0.0 <= snapshot.kp_index <= 9.0
     assert snapshot.f107_flux > 0
+
+
+def _json_response(payload):
+    resp = MagicMock()
+    resp.json.return_value = payload
+    return resp
+
+
+def test_fetch_kp_history_merges_3h_product_with_thinned_1m_feed():
+    one_minute = [{"time_tag": f"2026-11-04T12:{m:02d}:00", "estimated_kp": 2.0 + m / 100} for m in range(31)]
+    three_hourly = [
+        {"time_tag": "2026-11-04T06:00:00", "Kp": 1.0},
+        {"time_tag": "2026-11-04T09:00:00", "Kp": 1.67},
+        {"time_tag": "2026-11-04T12:00:00", "Kp": 2.33},  # overlaps the 1-minute feed — dropped
+    ]
+    responses = {SWPC_KP_1M_URL: one_minute, SWPC_KP_3H_URL: three_hourly}
+    with patch("data.space_weather.requests.get", side_effect=lambda url, timeout: _json_response(responses[url])):
+        history = fetch_kp_history(resample_minutes=15)
+
+    times = [t.strftime("%H:%M") for t, _ in history]
+    assert times == ["06:00", "09:00", "12:00", "12:15", "12:30"]
+    assert history[2][1] == 2.0  # 12:00 comes from the 1-minute feed, not the 3-hourly product
+    assert all(t.tzinfo is not None for t, _ in history)
+
+
+def test_fetch_f107_history_sorts_oldest_first():
+    payload = [
+        {"time_tag": "2026-11-03T20:00:00", "flux": 100.0},
+        {"time_tag": "2026-11-01T20:00:00", "flux": 98.0},
+        {"time_tag": "2026-11-02T20:00:00", "flux": None},
+    ]
+    with patch("data.space_weather.requests.get", return_value=_json_response(payload)):
+        history = fetch_f107_history()
+    assert [v for _, v in history] == [98.0, 100.0]

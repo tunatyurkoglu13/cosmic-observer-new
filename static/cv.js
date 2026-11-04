@@ -84,7 +84,7 @@ const TAB_REFRESH_MS = {
   telescopes: 5 * 60 * 1000,
   solar: 5 * 60 * 1000,
   earth: 10 * 60 * 1000,
-  mars: 10 * 60 * 1000,
+  apod: 60 * 60 * 1000,
 };
 
 const tabLoaders = {
@@ -92,7 +92,7 @@ const tabLoaders = {
   telescopes: loadTelescopes,
   solar: loadSolar,
   earth: loadEarth,
-  mars: loadMarsRovers,
+  apod: loadApod,
 };
 
 let activeRefreshTimer = null;
@@ -224,7 +224,7 @@ function handleMetadataMessage(jsonText) {
   document.getElementById('stat-targets').textContent = data.detections.length;
   document.getElementById('stat-conf').textContent = data.avg_confidence.toFixed(2);
 
-  updateAnomalyDisplay(data.anomaly);
+  updateAnomalyDisplay(data.anomaly, data.anomaly_mode);
 
   const listEl = document.getElementById('detections-list');
   if (data.detections.length === 0) {
@@ -331,7 +331,7 @@ initCRTNoise(document.getElementById('cv-visual'));
 // Anomaly detection (ConvAutoencoder, cv/anomaly.py + cv/anomaly_train.py)
 // ---------------------------------------------------------------------
 
-function updateAnomalyDisplay(anomaly) {
+function updateAnomalyDisplay(anomaly, mode) {
   const errorEl = document.getElementById('anomaly-error');
   const thresholdEl = document.getElementById('anomaly-threshold');
   const statusEl = document.getElementById('anomaly-status');
@@ -339,8 +339,9 @@ function updateAnomalyDisplay(anomaly) {
   if (!anomaly) {
     errorEl.textContent = '--';
     thresholdEl.textContent = '--';
-    statusEl.textContent = 'MODEL NOT LOADED';
-    statusEl.className = 'hud-signal-degraded';
+    // The autoencoder models the ISS camera; other footage isn't scored.
+    statusEl.textContent = mode === 'iss_only' ? 'ISS FEED ONLY' : 'MODEL NOT LOADED';
+    statusEl.className = mode === 'iss_only' ? 'dim' : 'hud-signal-degraded';
     return;
   }
 
@@ -564,45 +565,69 @@ async function loadEarth() {
 initCRTNoise(document.getElementById('earth-visual'));
 
 // ===========================================================================
-// Tab: MARS ROVERS — latest real downlinked photos (Curiosity/Perseverance).
+// Tab: PICTURE OF THE DAY — NASA APOD (an image, or a video shown as its
+// thumbnail linking out: embedding third-party players is deliberately
+// avoided, the page's CSP allows no frames).
 // ===========================================================================
 
-let currentRover = 'curiosity';
-
-async function loadMarsRovers() {
-  const gridEl = document.getElementById('rover-grid');
-  document.getElementById('mars-rover-name').textContent = currentRover.toUpperCase();
+function safeHttpUrl(url) {
   try {
-    const data = await fetchJson(`/api/sensors/mars-rover/${currentRover}`);
-    if (data.count === 0) {
-      gridEl.innerHTML = '<div class="dim">NO RECENT PHOTOS RETURNED</div>';
-    } else {
-      gridEl.innerHTML = data.photos
-        .slice(0, 12)
-        .map((p) => `
-          <div class="rover-photo">
-            <img src="${p.img_src}" alt="${p.camera_full_name}" loading="lazy" />
-            <div class="rover-caption">${p.camera_name} &middot; SOL ${p.sol} &middot; ${p.earth_date}</div>
-          </div>
-        `)
-        .join('');
-      document.getElementById('mars-rover-status').textContent = data.photos[0].rover_status.toUpperCase();
-      document.getElementById('mars-rover-sol').textContent = data.photos[0].sol;
-    }
-    setSignal('mars-signal', 'optimal');
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
   } catch (err) {
-    gridEl.innerHTML = `<div class="dim">MARS UPLINK OFFLINE — ${err.message || err}<br><br>This is a real NASA API outage (this project's Mars Rover Photos client hit this during development too — see data/mars_rover_photos.py), not a simulated failure. It's cached and retried automatically once the service recovers.</div>`;
-    document.getElementById('mars-rover-status').textContent = '--';
-    document.getElementById('mars-rover-sol').textContent = '--';
-    setSignal('mars-signal', 'none');
+    return null;
   }
 }
 
-document.querySelectorAll('#panel-mars .co-btn[data-rover]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#panel-mars .co-btn[data-rover]').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentRover = btn.dataset.rover;
-    loadMarsRovers();
-  });
-});
+async function loadApod() {
+  const img = document.getElementById('apod-img');
+  const ph = document.getElementById('apod-placeholder');
+  const link = document.getElementById('apod-link');
+  try {
+    const data = await fetchJson('/api/sensors/apod');
+    const imageUrl = safeHttpUrl(data.media_type === 'image' ? data.url : data.thumbnail_url);
+    const fullUrl = safeHttpUrl(data.hdurl || data.url);
+    if (imageUrl) {
+      img.src = imageUrl;
+      img.alt = data.title || 'Astronomy Picture of the Day';
+      img.style.display = 'block';
+      ph.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      ph.style.display = 'block';
+      ph.textContent = "TODAY'S APOD IS A VIDEO — OPEN IT BELOW";
+    }
+    document.getElementById('apod-title').textContent = data.title || '--';
+    document.getElementById('apod-date').textContent = data.date || '--';
+    document.getElementById('apod-credit').textContent = data.copyright || 'NASA (public domain)';
+    document.getElementById('apod-explanation').textContent = data.explanation || '';
+    if (fullUrl) {
+      link.href = fullUrl;
+      link.style.display = 'inline-block';
+    }
+    setSignal('apod-signal', 'optimal');
+  } catch (err) {
+    img.style.display = 'none';
+    ph.style.display = 'block';
+    ph.textContent = `NO SIGNAL: ${err.message || err}`;
+    setSignal('apod-signal', 'none');
+  }
+}
+
+// Credit line for the NASA library clip the stream source plays.
+fetchJson('/api/cv/footage')
+  .then((data) => {
+    const clip = data.clips[data.default];
+    const href = safeHttpUrl(clip.details_url);
+    const el = document.getElementById('footage-credit');
+    el.textContent = `NASA FOOTAGE: ${clip.title} (${clip.recorded}) · `;
+    if (href) {
+      const a = document.createElement('a');
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = 'images.nasa.gov ↗';
+      el.appendChild(a);
+    }
+  })
+  .catch(() => { /* credit line is optional */ });

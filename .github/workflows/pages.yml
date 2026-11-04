@@ -1,0 +1,85 @@
+name: Pages
+
+# Builds the static showcase (scripts/build_static_site.py) and publishes it
+# to GitHub Pages. The build runs the real backend headless to capture fresh
+# data, so it re-runs on a schedule as well as on every push to main.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Every 3 hours — keep in sync with REFRESH_HOURS in scripts/build_static_site.py.
+    - cron: "23 */3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One deployment at a time; never cancel one mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      # Metric/alert history and last-good API responses carried between
+      # builds — see the --state-dir notes in build_static_site.py.
+      - name: Restore build state
+        uses: actions/cache/restore@v4
+        with:
+          path: .pages-state
+          key: pages-state-${{ github.run_id }}
+          restore-keys: pages-state-
+
+      - name: Build site
+        env:
+          # Optional; without it NASA's rate-limited DEMO_KEY is used. The
+          # build refuses to publish if this value appears in any output file.
+          NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+        run: python scripts/build_static_site.py --site-url "${{ steps.pages.outputs.base_url }}"
+
+      - name: Save build state
+        uses: actions/cache/save@v4
+        with:
+          path: .pages-state
+          key: pages-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

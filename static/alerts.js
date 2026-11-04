@@ -6,7 +6,7 @@
 
 const CATEGORY_LABELS = {
   conjunction: 'CONJUNCTION', anomaly: 'CV ANOMALY',
-  neo_risk: 'NEO RISK', neo_close_approach: 'NEO CLOSE APPROACH',
+  neo_risk: 'NEO RISK', neo_close_approach: 'NEO CLOSE APPROACH', space_weather: 'SPACE WEATHER',
 };
 
 let currentAlerts = [];

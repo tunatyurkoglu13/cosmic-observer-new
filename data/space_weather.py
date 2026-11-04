@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import requests
@@ -136,6 +137,51 @@ def fetch_latest_f107() -> float:
 def fetch_current_snapshot() -> SpaceWeatherSnapshot:
     """Convenience: fetch both Kp and F10.7 in one call for feeding the density model."""
     return SpaceWeatherSnapshot(kp_index=fetch_latest_kp(), f107_flux=fetch_latest_f107())
+
+
+def _parse_swpc_time(time_tag: str) -> datetime:
+    """SWPC time tags are naive ISO strings in UTC."""
+    return datetime.fromisoformat(time_tag).replace(tzinfo=timezone.utc)
+
+
+def fetch_kp_history(resample_minutes: int = 15) -> list[tuple[datetime, float]]:
+    """
+    Recent Kp history, oldest first: the official 3-hourly product
+    (~7 days) for everything older than the 1-minute estimate feed, then
+    that feed (~last 6 hours) thinned to one point per `resample_minutes`
+    so it doesn't swamp a 30-day store with 1-minute rows.
+    """
+    resp = requests.get(SWPC_KP_1M_URL, timeout=15)
+    resp.raise_for_status()
+    recent: list[tuple[datetime, float]] = []
+    for rec in resp.json():
+        value = rec.get("estimated_kp", rec.get("kp_index"))
+        if value is None:
+            continue
+        t = _parse_swpc_time(rec["time_tag"])
+        if not recent or t - recent[-1][0] >= timedelta(minutes=resample_minutes):
+            recent.append((t, float(value)))
+
+    resp = requests.get(SWPC_KP_3H_URL, timeout=15)
+    resp.raise_for_status()
+    cutoff = recent[0][0] if recent else datetime.max.replace(tzinfo=timezone.utc)
+    older = [
+        (t, float(rec["Kp"]))
+        for rec in resp.json()
+        if rec.get("Kp") is not None and (t := _parse_swpc_time(rec["time_tag"])) < cutoff
+    ]
+    return sorted(older) + recent
+
+
+def fetch_f107_history() -> list[tuple[datetime, float]]:
+    """Observed F10.7 flux history (~30 days, up to three readings a day), oldest first."""
+    resp = requests.get(SWPC_F107_HISTORY_URL, timeout=15)
+    resp.raise_for_status()
+    return sorted(
+        (_parse_swpc_time(rec["time_tag"]), float(rec["flux"]))
+        for rec in resp.json()
+        if rec.get("flux") is not None
+    )
 
 
 def fetch_donki_notifications(start_date: str, end_date: str, api_key: str | None = None) -> list[dict]:

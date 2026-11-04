@@ -28,6 +28,36 @@ from viz.retro_ui import generate_crt_flicker_css, generate_holo_panel_css, gene
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
+def write_dashboard_snapshot(
+    out_path: Path,
+    active_group: str = "visual",
+    active_limit: int = 300,
+    debris_limit: int = 75,
+    frames: int = 24,
+    step_hours: float = 1.0,
+) -> None:
+    """Fetch live TLEs, propagate them, and write the dashboard's snapshot.json to `out_path`."""
+    mgr = TLEManager()
+    stations = mgr.fetch_group("stations")
+    active = mgr.fetch_group(active_group)[:active_limit]
+    debris = mgr.fetch_group("debris")[:debris_limit]
+
+    all_sats = stations + active + debris
+    print(f"Building snapshot for {len(all_sats)} objects "
+          f"({len(stations)} stations, {len(active)} active, {len(debris)} debris)...")
+
+    epoch = datetime.now(timezone.utc)
+    snapshot = build_snapshot(all_sats, epoch, n_frames=frames, frame_step=timedelta(hours=step_hours))
+    print(f"Propagated {len(snapshot.satellites)} objects successfully across {frames} frames.")
+
+    add_ground_tracks(snapshot, stations, epoch, step=timedelta(minutes=1))
+    print(f"Computed orbit ground tracks for {len(snapshot.ground_tracks)} station-class objects.")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_snapshot_json(snapshot, out_path)
+    print(f"Wrote {out_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -42,27 +72,11 @@ def main() -> None:
     parser.add_argument("--step-hours", type=float, default=1.0, help="Hours between frames")
     args = parser.parse_args()
 
-    mgr = TLEManager()
-    stations = mgr.fetch_group("stations")
-    active = mgr.fetch_group(args.active_group)[: args.active_limit]
-    debris = mgr.fetch_group("debris")[: args.debris_limit]
-
-    all_sats = stations + active + debris
-    print(f"Building snapshot for {len(all_sats)} objects "
-          f"({len(stations)} stations, {len(active)} active, {len(debris)} debris)...")
-
-    epoch = datetime.now(timezone.utc)
-    snapshot = build_snapshot(
-        all_sats, epoch, n_frames=args.frames, frame_step=timedelta(hours=args.step_hours)
+    write_dashboard_snapshot(
+        STATIC_DIR / "snapshot.json",
+        active_group=args.active_group, active_limit=args.active_limit,
+        debris_limit=args.debris_limit, frames=args.frames, step_hours=args.step_hours,
     )
-    print(f"Propagated {len(snapshot.satellites)} objects successfully across {args.frames} frames.")
-
-    add_ground_tracks(snapshot, stations, epoch, step=timedelta(minutes=1))
-    print(f"Computed orbit ground tracks for {len(snapshot.ground_tracks)} station-class objects.")
-
-    STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    write_snapshot_json(snapshot, STATIC_DIR / "snapshot.json")
-    print(f"Wrote {STATIC_DIR / 'snapshot.json'}")
 
     css = "\n\n".join([
         generate_theme_css(),

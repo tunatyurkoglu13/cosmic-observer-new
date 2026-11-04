@@ -483,8 +483,12 @@ def test_ws_cv_iss_live_source_streams_real_frame_when_available():
 
 
 def test_ws_cv_iss_live_falls_back_to_sample_when_unreachable():
-    """Regression test: an unreachable ISS live feed must degrade to the sample clip with a disclosed notice, not fail silently or crash."""
-    with patch("app.resolve_iss_stream_url", side_effect=RuntimeError("simulated: stream not live")):
+    """Regression test: with the ISS feed and NASA footage both unreachable, the stream degrades to the sample clip with a disclosed notice."""
+    async def no_footage():
+        return None, None
+
+    with patch("app.resolve_iss_stream_url", side_effect=RuntimeError("simulated: stream not live")), \
+            patch("app._open_nasa_footage", no_footage):
         with client.websocket_connect("/ws/cv?source=iss_live&target_fps=1000") as ws:
             notice_msg = ws.receive_json()
             assert "notice" in notice_msg
@@ -557,3 +561,72 @@ def test_cola_scan_rejects_oversized_search_window():
         "candidate_step_minutes": 1,
     })
     assert resp.status_code == 400
+
+
+def test_cola_scan_unreachable_inclination_is_a_400_not_a_500():
+    with patch.object(app_module, "_fetch_cola_catalog", return_value=[]):
+        resp = client.post("/api/cola/scan", json={
+            "site": "plesetsk", "target_inclination_deg": 51.6,  # Plesetsk sits at ~62.9 deg N
+            "search_start": "2026-01-01T00:00:00Z", "search_end": "2026-01-01T01:00:00Z",
+        })
+    assert resp.status_code == 400
+    assert "not directly reachable" in resp.json()["detail"]
+
+
+def test_telescope_endpoint_reports_empty_archive_as_503():
+    with patch("app.SpaceTelescopeClient.fetch_latest_observation", side_effect=RuntimeError("MAST returned no observations")):
+        resp = client.get("/api/sensors/telescopes/jwst")
+    assert resp.status_code == 503
+    assert "no observations" in resp.json()["detail"]
+
+
+def test_ws_cv_iss_live_prefers_nasa_footage_over_sample(monkeypatch):
+    import numpy as np
+
+    class FakeFootage:
+        clip = app_module.FOOTAGE_CLIPS[app_module.DEFAULT_FOOTAGE_CLIP]
+        def isOpened(self): return True
+        def read(self): return True, np.zeros((64, 64, 3), np.uint8)
+        def set(self, *args): return True
+        def release(self): pass
+
+    async def footage():
+        return FakeFootage(), "NASA 2020-12-07"
+
+    with patch("app.resolve_iss_stream_url", side_effect=RuntimeError("simulated: stream not live")), \
+            patch("app._open_nasa_footage", footage):
+        with client.websocket_connect("/ws/cv?source=iss_live&target_fps=1000") as ws:
+            notice = ws.receive_json()["notice"]
+            assert "recorded NASA footage" in notice
+            assert ws.receive_bytes()[:2] == b"\xff\xd8"
+
+
+def test_ws_cv_nasa_footage_never_raises_alerts():
+    """Recorded footage shows anomaly scores but must not write alerts (they describe live observation)."""
+    import numpy as np
+    from cv.anomaly import AnomalyResult
+
+    class FakeFootage:
+        clip = app_module.FOOTAGE_CLIPS[app_module.DEFAULT_FOOTAGE_CLIP]
+        def isOpened(self): return True
+        def read(self): return True, np.zeros((64, 64, 3), np.uint8)
+        def set(self, *args): return True
+        def release(self): pass
+
+    async def footage():
+        return FakeFootage(), "NASA 2020-12-07"
+
+    processor = app_module._get_cv_processor("coco")
+    original_process = processor.process
+
+    def process_with_anomaly(frame, label, score_anomaly=True):
+        result = original_process(frame, label, score_anomaly)
+        result.anomaly = AnomalyResult(reconstruction_error=1.0, threshold=0.1, is_anomaly=True)
+        return result
+
+    before = app_module._alert_store.count_unacknowledged()
+    with patch("app._open_nasa_footage", footage), patch.object(processor, "process", process_with_anomaly):
+        with client.websocket_connect("/ws/cv?source=nasa_footage&target_fps=1000") as ws:
+            ws.receive_bytes()
+            assert ws.receive_json()["anomaly"]["is_anomaly"] is True
+    assert app_module._alert_store.count_unacknowledged() == before

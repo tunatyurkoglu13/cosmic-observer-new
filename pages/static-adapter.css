@@ -1,0 +1,90 @@
+/* COSMIC OBSERVER — styles for the static-site adapter (GitHub Pages build only).
+   Uses the same --co-* tokens as retro.css so snapshot UI reads as part of the HUD. */
+
+.co-snapshot-chip {
+  margin-top: 8px;
+  font-family: var(--co-font);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--co-phosphor-green);
+  max-width: 420px;
+}
+
+.co-snapshot-chip > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border: 1px solid rgba(0, 255, 102, 0.45);
+  background: rgba(0, 255, 102, 0.06);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.co-snapshot-chip > summary::-webkit-details-marker { display: none; }
+.co-snapshot-chip > summary::after { content: '▾'; opacity: 0.6; }
+.co-snapshot-chip[open] > summary::after { content: '▴'; }
+.co-snapshot-chip > summary:hover { background: rgba(0, 255, 102, 0.14); }
+.co-snapshot-chip > summary:focus-visible { outline: 1px solid var(--co-phosphor-green); outline-offset: 2px; }
+
+.co-snapshot-time { opacity: 0.75; }
+
+.co-snapshot-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--co-phosphor-green);
+  box-shadow: 0 0 6px var(--co-phosphor-green);
+  animation: co-snapshot-pulse 2.4s ease-in-out infinite;
+}
+@keyframes co-snapshot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .co-snapshot-dot { animation: none; }
+}
+
+.co-snapshot-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 255, 255, 0.25);
+  border-left: 2px solid var(--co-phosphor-green);
+  background: rgba(0, 10, 12, 0.92);
+  color: var(--co-cyan);
+  font-size: 10px;
+  line-height: 1.55;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+.co-snapshot-body p { margin: 0 0 6px 0; opacity: 0.85; }
+.co-snapshot-meta { color: var(--co-amber); opacity: 1 !important; }
+
+.co-snapshot-link {
+  display: inline-block;
+  margin-top: 2px;
+  color: var(--co-phosphor-green);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.co-snapshot-link:hover { border-bottom-style: solid; }
+
+.co-snapshot-hint {
+  margin-top: 6px;
+  font-size: 9px;
+  line-height: 1.45;
+  letter-spacing: 0.04em;
+  color: var(--co-amber);
+  opacity: 0.8;
+}
+
+/* Controls that need the live backend */
+.co-static input:disabled,
+.co-static select:disabled,
+.co-static button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Alerts are read-only in the snapshot — acknowledging needs the backend */
+.co-static .alert-ack-btn { display: none; }

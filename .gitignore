@@ -11,7 +11,17 @@ data/cache/
 .DS_Store
 *.pt
 runs/
-models/
+# Trained checkpoints are build inputs for the Pages demo, so the small
+# ones the app serves are tracked; everything else under models/ is not.
+models/*
+!models/space_yolov8.pt
+!models/space_yolov8_meta.json
+!models/anomaly_autoencoder.pt
+!models/anomaly_meta.json
 data/cv_uploads/
 static/cv_sample.mp4
 data/cv_training/
+
+# GitHub Pages build (scripts/build_static_site.py)
+_site/
+.pages-state/

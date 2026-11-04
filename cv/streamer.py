@@ -75,12 +75,19 @@ class FrameProcessor:
             except Exception:
                 self.anomaly_detector = None
 
-    def process(self, frame_bgr: np.ndarray, source_label: str = "SAMPLE") -> ProcessedFrame:
-        """Run detection + anomaly scoring on one frame and return it HUD-annotated (frame is modified in place)."""
+    def process(self, frame_bgr: np.ndarray, source_label: str = "SAMPLE", score_anomaly: bool = True) -> ProcessedFrame:
+        """
+        Run detection + anomaly scoring on one frame and return it HUD-annotated (frame is modified in place).
+
+        score_anomaly=False skips the autoencoder: it models the ISS external
+        camera, so scoring unrelated footage would only ever say "anomaly".
+        """
         detections = self.detector.detect(frame_bgr, confidence_threshold=self.confidence_threshold)
         self.metrics.update(detections)
 
-        anomaly_result = self.anomaly_detector.score_frame(frame_bgr) if self.anomaly_detector else None
+        anomaly_result = (
+            self.anomaly_detector.score_frame(frame_bgr) if self.anomaly_detector and score_anomaly else None
+        )
 
         draw_hud(frame_bgr, detections, self.metrics, source_label=source_label, anomaly=anomaly_result)
         return ProcessedFrame(frame_bgr=frame_bgr, detections=detections, metrics=self.metrics, anomaly=anomaly_result)

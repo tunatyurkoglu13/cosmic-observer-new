@@ -17,7 +17,7 @@ import { feature as topoFeature } from 'topojson-client';
 // guarantees the continents can never be mismatched/mirrored relative to
 // everything else in the scene, since there is no separate texture/UV
 // mapping involved at all, only shared coordinate math.
-const LAND_TOPOLOGY_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json';
+const LAND_TOPOLOGY_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/land-110m.json';
 
 const R_EARTH_KM = 6378.137;
 const GLOBE_RADIUS = 4.0; // scene units representing R_EARTH_KM
@@ -40,14 +40,141 @@ const CLASS_COLOR = {
 
 const ISS_NORAD_ID = 25544;
 
+// Earth-fixed geodetic -> scene coordinates. The scene maps ECEF (X, Y, Z)
+// to (x, y, z) = (X, Z, -Y): a proper rotation (determinant +1) that puts
+// the north pole up. Mapping Y to +z instead would mirror the globe —
+// east would run clockwise seen from above the pole.
 function latLonAltToVector3(latDeg, lonDeg, altKm, out) {
   const radius = GLOBE_RADIUS * ((R_EARTH_KM + (altKm || 0)) / R_EARTH_KM);
   const lat = THREE.MathUtils.degToRad(latDeg);
   const lon = THREE.MathUtils.degToRad(lonDeg);
   const x = radius * Math.cos(lat) * Math.cos(lon);
-  const z = radius * Math.cos(lat) * Math.sin(lon);
+  const z = -radius * Math.cos(lat) * Math.sin(lon);
   const y = radius * Math.sin(lat);
   return out ? out.set(x, y, z) : new THREE.Vector3(x, y, z);
+}
+
+// ---------------------------------------------------------------------------
+// Reference frames. The scene's world frame is inertial (equatorial, axes
+// mapped exactly like latLonAltToVector3 maps ECEF). JPL Horizons vectors
+// arrive in the ecliptic frame (data/horizons.py: REF_PLANE=ECLIPTIC) and
+// are rotated into it by horizonsToScene(). Everything Earth-fixed —
+// globe, coastlines, satellites, launch sites, events — lives in one group
+// rotated by Greenwich mean sidereal time, so the Sun drawn in the scene is
+// the Sun that lights the globe, and playing the timeline turns the Earth
+// beneath it.
+// ---------------------------------------------------------------------------
+
+const OBLIQUITY_RAD = THREE.MathUtils.degToRad(23.4392911); // J2000 mean obliquity of the ecliptic
+
+function gmstRad(date) {
+  // IAU 1982 GMST, linear term only (UT1 ~ UTC): ~0.1 s/century — far finer than this scene can show.
+  const daysSinceJ2000 = date.getTime() / 86400000 + 2440587.5 - 2451545.0;
+  const deg = 280.46061837 + 360.98564736629 * daysSinceJ2000;
+  return THREE.MathUtils.degToRad(((deg % 360) + 360) % 360);
+}
+
+function horizonsToScene(vec) {
+  const [x, y, z] = vec;
+  const c = Math.cos(OBLIQUITY_RAD);
+  const s = Math.sin(OBLIQUITY_RAD);
+  // ecliptic -> equatorial: rotate about the vernal-equinox axis by the obliquity
+  const yEq = y * c - z * s;
+  const zEq = y * s + z * c;
+  return new THREE.Vector3(x, zEq, -yEq);
+}
+
+// Shared GLSL: equirectangular lookup that inverts latLonAltToVector3, so
+// imagery can never disagree with where satellites and coastlines are
+// plotted. atan() wraps at the antimeridian; derivatives are taken from
+// whichever of uv / uv-shifted-half-a-turn is continuous at the fragment,
+// so mipmapping doesn't draw a seam there.
+const EQUIRECT_GLSL = `
+const float PI = 3.141592653589793;
+vec2 equirectUv(vec3 p) {
+  float lat = asin(clamp(p.y, -1.0, 1.0));
+  float lon = atan(-p.z, p.x);
+  return vec2(lon / (2.0 * PI) + 0.5, lat / PI + 0.5);
+}
+vec3 sampleEquirect(sampler2D tex, vec2 uv) {
+  vec2 uvAlt = vec2(fract(uv.x + 0.5), uv.y);
+  vec2 dx = dFdx(uv), dy = dFdy(uv), dxAlt = dFdx(uvAlt), dyAlt = dFdy(uvAlt);
+  bool useAlt = dot(dx, dx) + dot(dy, dy) > dot(dxAlt, dxAlt) + dot(dyAlt, dyAlt);
+  return textureGrad(tex, uv, useAlt ? dxAlt : dx, useAlt ? dyAlt : dy).rgb;
+}
+`;
+
+function blankTexture() {
+  const texture = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function prepareEquirectTexture(texture, renderer) {
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// NASA Trek WMTS (data/nasa_imagery.py): stitch one zoom level's tiles
+// into a single equirectangular canvas texture.
+function loadTrekSurface(surface) {
+  const { columns, rows, tile_size: size, level } = surface;
+  const canvas = document.createElement('canvas');
+  canvas.width = columns * size;
+  canvas.height = rows * size;
+  const ctx = canvas.getContext('2d');
+  const tiles = [];
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < columns; x++) {
+      const url = surface.tile_url.replace('{z}', level).replace('{y}', y).replace('{x}', x);
+      tiles.push(new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => { ctx.drawImage(img, x * size, y * size, size, size); resolve(); };
+        img.onerror = () => reject(new Error(`Trek tile failed: ${url}`));
+        img.src = url;
+      }));
+    }
+  }
+  return Promise.all(tiles).then(() => new THREE.CanvasTexture(canvas));
+}
+
+function animateUniform(uniform, target, durationMs) {
+  const from = uniform.value;
+  const start = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / durationMs);
+    uniform.value = from + (target - from) * (1 - Math.pow(1 - t, 3));
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// Text from external feeds (event titles, notes) is untrusted: escape it
+// before it goes anywhere near innerHTML, and only ever link out over http(s).
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+function safeHref(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function formatUtcShort(iso) {
+  if (!iso) return '--';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '--';
+  const day = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'UTC' }).toUpperCase();
+  return `${day} ${d.toISOString().slice(11, 16)}Z`;
 }
 
 async function extractErrorDetail(resp) {
@@ -97,6 +224,59 @@ void main() {
 }
 `;
 
+// Earth: the holographic dark globe, cross-fading (uReveal) into real NASA
+// imagery — the day side from the latest complete Suomi NPP true-colour
+// mosaic (GIBS), its swath gaps filled from Blue Marble, and VIIRS night
+// lights on the night side. Lighting is computed Earth-fixed: the vertex
+// position IS the surface normal, and uSunDir is the real subsolar point
+// for the current frame (snapshot.subsolar_track).
+const EARTH_VERTEX_SHADER = `
+varying vec3 vObjPosition;
+varying vec3 vNormalWorld;
+varying vec3 vWorldPosition;
+void main() {
+  vObjPosition = position;
+  vNormalWorld = normalize(mat3(modelMatrix) * normal);
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  vWorldPosition = worldPos.xyz;
+  gl_Position = projectionMatrix * viewMatrix * worldPos;
+}
+`;
+
+const EARTH_FRAGMENT_SHADER = `
+uniform sampler2D uDay;
+uniform sampler2D uBase;
+uniform sampler2D uNight;
+uniform float uReveal;
+uniform float uNoData;
+uniform vec3 uSunDir;
+uniform vec3 uHoloColor;
+uniform vec3 uRimColor;
+varying vec3 vObjPosition;
+varying vec3 vNormalWorld;
+varying vec3 vWorldPosition;
+${EQUIRECT_GLSL}
+void main() {
+  vec3 p = normalize(vObjPosition);
+  vec2 uv = equirectUv(p);
+
+  vec3 day = sampleEquirect(uDay, uv);
+  float hasData = step(uNoData, max(day.r, max(day.g, day.b)));
+  vec3 dayColor = mix(sampleEquirect(uBase, uv), day, hasData);
+  vec3 lights = sampleEquirect(uNight, uv);
+
+  float sunHeight = dot(p, normalize(uSunDir));
+  float dayMix = smoothstep(-0.06, 0.1, sunHeight);
+  vec3 lit = dayColor * (0.55 + 0.45 * clamp(sunHeight * 2.0, 0.0, 1.0));
+  vec3 surface = mix(lights * 1.5, lit * 0.9, dayMix);
+  surface += vec3(1.0, 0.42, 0.12) * smoothstep(0.1, 0.0, abs(sunHeight)) * 0.06; // twilight band
+
+  vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+  float fresnel = pow(1.0 - max(dot(normalize(vNormalWorld), viewDir), 0.0), 3.0);
+  gl_FragColor = vec4(mix(uHoloColor, surface, uReveal) + uRimColor * fresnel * 0.35, 1.0);
+}
+`;
+
 // Tactical-hologram look for non-Earth bodies (Mercury/Venus/Mars,
 // moons): no photographic texture (this project deliberately never
 // samples a diffuse image — see dashboard.js history around Earth's
@@ -121,13 +301,20 @@ void main() {
 }
 `;
 
+// uSurface/uSurfaceMix: a real NASA Trek surface map (the Moon, Mars)
+// cross-faded in once its tiles have loaded. With a real surface, the real
+// Sun direction becomes the dominant light, so the Moon shows its true
+// phase; the tactical rim glow stays on top.
 const ROCKY_BODY_FRAGMENT_SHADER = `
 uniform vec3 uBaseColor;
 uniform vec3 uRimColor;
 uniform vec3 uLightDir;
+uniform sampler2D uSurface;
+uniform float uSurfaceMix;
 varying vec3 vPosition;
 varying vec3 vNormalWorld;
 varying vec3 vWorldPosition;
+${EQUIRECT_GLSL}
 
 void main() {
   vec3 normal = normalize(vNormalWorld);
@@ -157,7 +344,11 @@ void main() {
 
   vec3 rimGlow = uRimColor * fresnel * 1.3;
 
-  gl_FragColor = vec4(base + rimGlow, 1.0);
+  vec3 surface = sampleEquirect(uSurface, equirectUv(normalize(vPosition)))
+    * (0.06 + 0.94 * smoothstep(-0.05, 0.25, dot(normal, normalize(uLightDir))));
+  vec3 color = mix(base + rimGlow, surface + rimGlow * 0.45, uSurfaceMix);
+
+  gl_FragColor = vec4(color, 1.0);
 }
 `;
 
@@ -260,6 +451,9 @@ class Dashboard {
     this._initMissionPlanner();
     this._initCelestialBodies();
     this._initSmallBodies();
+    this._initImagery();
+    this._initEarthEvents();
+    this._initSpaceWeather();
 
     this._updateFrame(0);
     this._animate();
@@ -293,6 +487,11 @@ class Dashboard {
     // this automatically while the user is dragging and resumes after.
     this.controls.autoRotate = true;
     this.controls.autoRotateSpeed = 0.35;
+
+    // Everything Earth-fixed goes in here; _updateFrame() rotates it by
+    // sidereal time (see the reference-frame notes at the top).
+    this.earthFrame = new THREE.Group();
+    this.scene.add(this.earthFrame);
 
     // Remembered so "return to Earth" can restore the exact original vantage.
     this.homeCamera = {
@@ -514,11 +713,42 @@ class Dashboard {
     this.labels.push({ key, mesh, el });
   }
 
+  // Spheres that can hide what's behind them: a label is dropped when the
+  // line of sight to its object passes through a nearer one.
+  _labelOccluders() {
+    const occluders = [{ mesh: this.earth, radius: GLOBE_RADIUS }];
+    for (const body of Object.values(this.bodies || {})) occluders.push({ mesh: body.mesh, radius: body.radiusUnits });
+    if (this.sunMesh) occluders.push({ mesh: this.sunMesh, radius: this.sunMesh.geometry.parameters.radius });
+    return occluders;
+  }
+
+  _isOccluded(target, occluders) {
+    const eye = this.camera.position;
+    const toTarget = target.clone().sub(eye);
+    const targetDistance = toTarget.length();
+    toTarget.divideScalar(targetDistance);
+    const center = new THREE.Vector3();
+    for (const { mesh, radius } of occluders) {
+      mesh.getWorldPosition(center);
+      if (center.distanceToSquared(target) < 1e-6) continue; // the labelled object itself
+      const toCenter = center.sub(eye);
+      const along = toCenter.dot(toTarget);
+      if (along <= 0 || along >= targetDistance) continue;
+      if (toCenter.lengthSq() - along * along < radius * radius) return true;
+    }
+    return false;
+  }
+
   _updateLabels() {
     if (!this.labels) return;
     const v = new THREE.Vector3();
+    const occluders = this._labelOccluders();
     for (const label of this.labels) {
       label.mesh.getWorldPosition(v);
+      if (this._isOccluded(v, occluders)) {
+        label.el.style.display = 'none';
+        continue;
+      }
       v.project(this.camera);
 
       const behindCamera = v.z > 1;
@@ -537,18 +767,27 @@ class Dashboard {
   }
 
   _buildEarth() {
-    // Plain dark sphere — no day/night, no texture/UV mapping at all
-    // (removed per explicit request: no sun simulation, and a texture's
-    // own UV convention is one more thing that can silently disagree
-    // with this app's coordinate math). Continents are drawn separately
-    // in _buildContinentOutlines() as real coastline geometry placed
-    // with this app's own lat/lon -> xyz function — the same one used
-    // for every satellite and launch-site marker — so there is no way
-    // for the map to disagree with where anything else is plotted.
-    const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 64, 64);
-    const material = new THREE.MeshBasicMaterial({ color: 0x03060c });
-    this.earth = new THREE.Mesh(geometry, material);
-    this.scene.add(this.earth);
+    // Starts as the plain holographic globe; _initImagery() cross-fades
+    // real NASA imagery in. The shader samples it through equirectUv() —
+    // the exact inverse of latLonAltToVector3 — never through the sphere's
+    // own UVs, so imagery and plotted objects share one coordinate path.
+    const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 128, 64);
+    this.earthMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uDay: { value: blankTexture() },
+        uBase: { value: blankTexture() },
+        uNight: { value: blankTexture() },
+        uReveal: { value: 0 },
+        uNoData: { value: 8 / 255 },
+        uSunDir: { value: new THREE.Vector3(1, 0, 0) },
+        uHoloColor: { value: new THREE.Color(0x03060c) },
+        uRimColor: { value: new THREE.Color(PALETTE.cyan) },
+      },
+      vertexShader: EARTH_VERTEX_SHADER,
+      fragmentShader: EARTH_FRAGMENT_SHADER,
+    });
+    this.earth = new THREE.Mesh(geometry, this.earthMaterial);
+    this.earthFrame.add(this.earth);
     this._addWireframeOverlay(this.earth, GLOBE_RADIUS);
     this._addLabel('earth', this.earth, 'EARTH', PALETTE.cyan);
 
@@ -579,6 +818,8 @@ class Dashboard {
         }
 
         const material = new THREE.LineBasicMaterial({ color: PALETTE.cyan, transparent: true, opacity: 0.85 });
+        this.coastlineMaterial = material;
+        if (this.imageryReady && this.earthLayer === 'true_color') material.opacity = 0.18; // imagery already arrived
         const outlineRadius = 5; // km above the surface, avoids z-fighting with the base sphere
 
         for (const ring of polygons) {
@@ -601,7 +842,7 @@ class Dashboard {
           for (const seg of segments) {
             if (seg.length < 2) continue;
             const geometry = new THREE.BufferGeometry().setFromPoints(seg);
-            this.scene.add(new THREE.Line(geometry, material));
+            this.earthFrame.add(new THREE.Line(geometry, material));
           }
         }
       })
@@ -634,7 +875,7 @@ class Dashboard {
       });
 
       const points = new THREE.Points(geometry, material);
-      this.scene.add(points);
+      this.earthFrame.add(points);
       this.groups[cls] = { points, sats };
 
       sats.forEach((sat, i) => this.satelliteIndex.push({ sat, cls, i }));
@@ -650,7 +891,7 @@ class Dashboard {
         transparent: true, depthWrite: false, sizeAttenuation: true,
       });
       this.issPoint = new THREE.Points(geometry, material);
-      this.scene.add(this.issPoint);
+      this.earthFrame.add(this.issPoint);
       this.issSat = issSat;
     }
   }
@@ -665,7 +906,7 @@ class Dashboard {
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
         const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.45 });
         const line = new THREE.Line(geometry, material);
-        this.scene.add(line);
+        this.earthFrame.add(line);
         this.trackLines.push(line);
       }
     }
@@ -719,11 +960,18 @@ class Dashboard {
     const pointObjects = Object.values(this.groups).map((g) => g.points);
     if (this.issPoint) pointObjects.push(this.issPoint);
     if (this.smallBodyPoints) pointObjects.push(this.smallBodyPoints);
+    const eventGroups = Object.values(this.eventGroups || {}).filter((g) => g.visible);
+    pointObjects.push(...eventGroups.map((g) => g.points));
 
     const intersects = this.raycaster.intersectObjects(pointObjects);
     if (intersects.length === 0) return;
 
     const hit = intersects[0];
+    const eventGroup = eventGroups.find((g) => g.points === hit.object);
+    if (eventGroup) {
+      this._showEventInfo(eventGroup.events[hit.index]);
+      return;
+    }
     if (this.smallBodyPoints && hit.object === this.smallBodyPoints) {
       this._showSmallBodyInfo(this.smallBodyIndex[hit.index]);
       return;
@@ -759,6 +1007,10 @@ class Dashboard {
   _updateFrame(frameIndex) {
     this.frameIndex = frameIndex;
     this.slider.value = frameIndex;
+
+    this.earthFrame.rotation.y = gmstRad(new Date(this.snapshot.frame_times_iso[frameIndex]));
+    const subsolar = this.snapshot.subsolar_track && this.snapshot.subsolar_track[frameIndex];
+    if (subsolar) latLonAltToVector3(subsolar[0], subsolar[1], 0, this.earthMaterial.uniforms.uSunDir.value).normalize();
 
     const tmp = new THREE.Vector3();
 
@@ -803,6 +1055,11 @@ class Dashboard {
       this.sunCoreMaterial.uniforms.uTime.value = performance.now() / 1000;
     }
 
+    if (this.eventGroups) {
+      const pulse = 0.2 * (1 + 0.25 * Math.sin(performance.now() / 380));
+      for (const group of Object.values(this.eventGroups)) group.material.size = pulse;
+    }
+
     this._updateLabels();
     this.composer.render();
   }
@@ -830,7 +1087,7 @@ class Dashboard {
           const marker = new THREE.Mesh(geometry, material);
           const pos = latLonAltToVector3(site.lat_deg, site.lon_deg, 5);
           marker.position.copy(pos);
-          this.scene.add(marker);
+          this.earthFrame.add(marker);
           this.launchSiteMarkers[key] = marker;
         }
       })
@@ -882,7 +1139,7 @@ class Dashboard {
       if (!resp.ok) throw new Error(await extractErrorDetail(resp));
       data = await resp.json();
     } catch (err) {
-      statusEl.textContent = `HATA: ${err.message || err}`;
+      statusEl.textContent = `ERROR: ${err.message || err}`;
       return;
     }
 
@@ -923,7 +1180,7 @@ class Dashboard {
 
   _clearTrajectory() {
     if (this.trajectoryLine) {
-      this.scene.remove(this.trajectoryLine);
+      this.earthFrame.remove(this.trajectoryLine);
       this.trajectoryLine.geometry.dispose();
       this.trajectoryLine.material.dispose();
       this.trajectoryLine = null;
@@ -952,7 +1209,7 @@ class Dashboard {
       if (!resp.ok) throw new Error(await extractErrorDetail(resp));
       data = await resp.json();
     } catch (err) {
-      document.getElementById('mp-status').textContent = `HATA: ${err.message || err}`;
+      document.getElementById('mp-status').textContent = `ERROR: ${err.message || err}`;
       return;
     }
 
@@ -983,7 +1240,7 @@ class Dashboard {
 
     const material = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
     this.trajectoryLine = new THREE.Line(geometry, material);
-    this.scene.add(this.trajectoryLine);
+    this.earthFrame.add(this.trajectoryLine);
   }
 
   // -------------------------------------------------------------------
@@ -1021,17 +1278,20 @@ class Dashboard {
     const displayRadius = 2.6;
     const displayDistance = this._displayDistanceUnits(position.distance_km) + 10;
 
-    const direction = new THREE.Vector3(...position.direction).normalize();
+    const direction = horizonsToScene(position.direction).normalize();
     const sunPosition = direction.clone().multiplyScalar(displayDistance);
 
     // The Sun's real direction from Earth varies (it's genuinely
     // wherever it currently is along Earth's orbit) and could easily
     // fall outside the original fixed home camera framing — recompose
     // the home view once, on load, so Earth AND the newly-placed Sun
-    // are both actually visible together, instead of leaving the Sun
-    // to be found only by manually rotating.
-    const framingBack = direction.clone().multiplyScalar(-14);
-    const homePosition = framingBack.add(new THREE.Vector3(0, 6, 0));
+    // are both actually visible together. The camera sits off to one
+    // side of the Sun line, so the globe shows its day side, the
+    // terminator and city lights at once.
+    const sideways = new THREE.Vector3().crossVectors(direction, new THREE.Vector3(0, 1, 0)).normalize();
+    const homePosition = direction.clone().multiplyScalar(-6)
+      .add(sideways.multiplyScalar(12.5))
+      .add(new THREE.Vector3(0, 4.5, 0));
     this.camera.position.copy(homePosition);
     this.camera.lookAt(0, 0, 0);
     this.controls.update();
@@ -1063,7 +1323,9 @@ class Dashboard {
       side: THREE.BackSide,
       transparent: true,
     });
-    this.scene.add(new THREE.Mesh(glowGeometry, glowMaterial));
+    const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+    glow.position.copy(sunPosition);
+    this.scene.add(glow);
 
     // A procedural, no-external-texture stand-in for a lens-flare halo
     // (this project deliberately avoids photographic/binary texture
@@ -1124,20 +1386,43 @@ class Dashboard {
         // nothing there to label. Positions are fetched once and cached
         // resiliently server-side either way (core.resilient_fetch), so
         // this costs a handful of parallel requests at load, not per visit.
-        await Promise.all(Object.entries(bodies).map(async ([key, meta]) => {
+        const fetched = await Promise.all(Object.entries(bodies).map(async ([key, meta]) => {
           try {
             const resp = await fetch(`/api/solar-system/${key}/position`);
-            if (!resp.ok) return;
-            const position = await resp.json();
-            this._getOrBuildBody(key, meta, position);
+            return resp.ok ? { key, meta, position: await resp.json() } : null;
           } catch (err) {
             console.error(`Failed to pre-build body '${key}':`, err);
+            return null;
           }
         }));
+        // Nearest first: _getOrBuildBody pushes each body outward until it
+        // clears the ones already placed, so build order = real distance order.
+        fetched
+          .filter(Boolean)
+          .sort((a, b) => a.position.distance_km - b.position.distance_km)
+          .forEach(({ key, meta, position }) => this._getOrBuildBody(key, meta, position));
       })
       .catch((err) => console.error('Failed to load celestial body list:', err));
 
     select.addEventListener('change', () => this._travelToBody(select.value));
+  }
+
+  // Compressed distances plus enlarged radii mean two planets that are close
+  // together in the sky (Mars and Jupiter, say) can end up inside each
+  // other. Slide the body further out along its own real direction —
+  // direction is the real quantity here, distance is already compressed —
+  // until it clears every body placed before it.
+  _clearDisplayDistance(direction, distance, radiusUnits) {
+    const candidate = new THREE.Vector3();
+    for (let i = 0; i < 400; i++) {
+      candidate.copy(direction).multiplyScalar(distance);
+      const blocked = Object.values(this.bodies).some(
+        (other) => candidate.distanceTo(other.mesh.position) < (radiusUnits + other.radiusUnits) * 1.15 + 0.5,
+      );
+      if (!blocked) break;
+      distance += 0.5;
+    }
+    return distance;
   }
 
   _displayDistanceUnits(distanceKm, radiusUnits = 0) {
@@ -1173,15 +1458,16 @@ class Dashboard {
     // so this only ever actually changes anything for Jupiter.
     const trueRadiusUnits = GLOBE_RADIUS * (meta.radius_km / R_EARTH_KM);
     const radiusUnits = Math.min(trueRadiusUnits, MAX_BODY_RADIUS_UNITS);
-    const displayDistance = this._displayDistanceUnits(position.distance_km, radiusUnits);
-
-    const direction = new THREE.Vector3(...position.direction).normalize();
+    const direction = horizonsToScene(position.direction).normalize();
+    const displayDistance = this._clearDisplayDistance(
+      direction, this._displayDistanceUnits(position.distance_km, radiusUnits), radiusUnits,
+    );
     const bodyPosition = direction.clone().multiplyScalar(displayDistance);
 
     // Real direction from THIS body toward the Sun right now (see
     // data.solar_system.BodyPosition.sun_direction) — the shader's
     // terminator is genuinely where the Sun currently falls on it.
-    const lightDir = new THREE.Vector3(...position.sun_direction).normalize();
+    const lightDir = horizonsToScene(position.sun_direction).normalize();
 
     const geometry = new THREE.SphereGeometry(radiusUnits, 64, 64);
     const material = new THREE.ShaderMaterial({
@@ -1189,6 +1475,8 @@ class Dashboard {
         uBaseColor: { value: new THREE.Color(meta.color_hex) },
         uRimColor: { value: new THREE.Color(PALETTE.cyan) },
         uLightDir: { value: lightDir },
+        uSurface: { value: blankTexture() },
+        uSurfaceMix: { value: 0 },
       },
       vertexShader: ROCKY_BODY_VERTEX_SHADER,
       fragmentShader: ROCKY_BODY_FRAGMENT_SHADER,
@@ -1247,6 +1535,7 @@ class Dashboard {
     };
     this.bodies[bodyKey] = body;
     this._addLabel(bodyKey, mesh, meta.display_name.toUpperCase(), meta.color_hex);
+    this._applySurface(bodyKey, material);
     this._attachMoonsForParent(bodyKey, bodyPosition);
     return body;
   }
@@ -1315,16 +1604,18 @@ class Dashboard {
       const radiusUnits = Math.max(0.08, GLOBE_RADIUS * (meta.radius_km / R_EARTH_KM));
       const displayDistance = this._moonDisplayDistanceUnits(position.distance_km, parentRadiusUnits);
 
-      const direction = new THREE.Vector3(...position.direction).normalize();
+      const direction = horizonsToScene(position.direction).normalize();
       const meshPosition = parentPosition.clone().add(direction.multiplyScalar(displayDistance));
 
-      const lightDir = new THREE.Vector3(...position.sun_direction).normalize();
-      const geometry = new THREE.SphereGeometry(radiusUnits, 32, 32);
+      const lightDir = horizonsToScene(position.sun_direction).normalize();
+      const geometry = new THREE.SphereGeometry(radiusUnits, 64, 64);
       const material = new THREE.ShaderMaterial({
         uniforms: {
           uBaseColor: { value: new THREE.Color(meta.color_hex) },
           uRimColor: { value: new THREE.Color(PALETTE.cyan) },
           uLightDir: { value: lightDir },
+          uSurface: { value: blankTexture() },
+          uSurfaceMix: { value: 0 },
         },
         vertexShader: ROCKY_BODY_VERTEX_SHADER,
         fragmentShader: ROCKY_BODY_FRAGMENT_SHADER,
@@ -1336,6 +1627,7 @@ class Dashboard {
 
       this.moonIndex.push({ key, meta, mesh, position });
       this._addLabel(key, mesh, meta.display_name.toUpperCase(), meta.color_hex);
+      this._applySurface(key, material);
     }
   }
 
@@ -1409,7 +1701,7 @@ class Dashboard {
       if (!resp.ok) throw new Error(await extractErrorDetail(resp));
       position = await resp.json();
     } catch (err) {
-      statusEl.textContent = `HATA: ${err.message || err}`;
+      statusEl.textContent = `ERROR: ${err.message || err}`;
       return;
     }
 
@@ -1425,6 +1717,220 @@ class Dashboard {
       this.controls.minDistance = body.minDistance;
       this.controls.maxDistance = body.maxDistance;
     });
+  }
+
+  // -------------------------------------------------------------------
+  // Real NASA imagery: GIBS for Earth, Solar System Treks for the Moon and
+  // Mars (layer choice: data/nasa_imagery.py, served by /api/imagery).
+  // Pixels load straight from NASA; the holographic look stays one click
+  // away via the EARTH LAYER selector.
+  // -------------------------------------------------------------------
+
+  _initImagery() {
+    this.earthLayer = 'true_color';
+    this.imageryReady = false;
+    this.surfaceTextures = {};
+
+    const select = document.getElementById('earth-layer');
+    const credit = document.getElementById('imagery-credit');
+    select.addEventListener('change', () => this._setEarthLayer(select.value));
+
+    this.imageryPromise = fetch('/api/imagery')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .catch((err) => {
+        console.warn('NASA imagery unavailable:', err);
+        return null;
+      });
+
+    this.imageryPromise.then(async (layers) => {
+      if (!layers) {
+        credit.textContent = 'NASA IMAGERY OFFLINE — HOLOGRAPHIC MODE';
+        select.value = 'holo';
+        select.disabled = true;
+        return;
+      }
+      const { earth } = layers;
+      credit.textContent = 'DOWNLINKING NASA GIBS IMAGERY…';
+      const loader = new THREE.TextureLoader();
+      loader.setCrossOrigin('anonymous');
+      const load = (url) => loader.loadAsync(url).then((t) => prepareEquirectTexture(t, this.renderer));
+      try {
+        const [day, base, night] = await Promise.all([
+          load(earth.true_color.url), load(earth.base.url), load(earth.night.url),
+        ]);
+        const u = this.earthMaterial.uniforms;
+        u.uDay.value = day;
+        u.uBase.value = base;
+        u.uNight.value = night;
+        u.uNoData.value = earth.no_data_max_channel / 255;
+        this.imageryReady = true;
+
+        const date = new Date(`${earth.true_color.date}T00:00:00Z`)
+          .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' })
+          .toUpperCase();
+        credit.textContent = `SUOMI NPP VIIRS · ${date} · ${Math.round(earth.true_color.coverage * 100)}% COVERAGE`;
+        credit.title = [earth.true_color.credit, earth.base.credit, earth.night.credit].join('\n');
+        this._setEarthLayer(this.earthLayer);
+      } catch (err) {
+        console.warn('GIBS texture load failed:', err);
+        credit.textContent = 'GIBS DOWNLINK FAILED — HOLOGRAPHIC MODE';
+      }
+    });
+  }
+
+  _setEarthLayer(layer) {
+    this.earthLayer = layer;
+    if (!this.imageryReady) return;
+    const real = layer === 'true_color';
+    animateUniform(this.earthMaterial.uniforms.uReveal, real ? 1 : 0, 1600);
+    if (this.coastlineMaterial) this.coastlineMaterial.opacity = real ? 0.18 : 0.85;
+  }
+
+  _applySurface(key, material) {
+    if (!this.imageryPromise) return;
+    this.imageryPromise
+      .then((layers) => {
+        const surface = layers && layers.surfaces && layers.surfaces[key];
+        if (!surface) return null;
+        this.surfaceTextures[key] = this.surfaceTextures[key]
+          || loadTrekSurface(surface).then((t) => prepareEquirectTexture(t, this.renderer));
+        return this.surfaceTextures[key];
+      })
+      .then((texture) => {
+        if (!texture) return;
+        material.uniforms.uSurface.value = texture;
+        animateUniform(material.uniforms.uSurfaceMix, 1, 1800);
+      })
+      .catch((err) => console.warn(`Trek surface for '${key}' unavailable:`, err));
+  }
+
+  // -------------------------------------------------------------------
+  // Natural events observed from orbit right now (NASA EONET): one
+  // marker per event at its latest position, plus the full track for
+  // storms. Legend rows toggle each category.
+  // -------------------------------------------------------------------
+
+  _initEarthEvents() {
+    this.eventGroups = {}; // category -> { points, track lines, events, visible }
+    fetch('/api/earth/events')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data) => this._buildEarthEvents(data))
+      .catch((err) => {
+        document.getElementById('event-legend').innerHTML = `<div class="dim">EONET OFFLINE</div>`;
+        console.warn('EONET unavailable:', err);
+      });
+  }
+
+  _buildEarthEvents({ categories, events }) {
+    const byCategory = {};
+    for (const event of events) (byCategory[event.category] = byCategory[event.category] || []).push(event);
+
+    const legend = document.getElementById('event-legend');
+    legend.innerHTML = '';
+    const tmp = new THREE.Vector3();
+
+    for (const [category, list] of Object.entries(byCategory)) {
+      const meta = categories[category] || { label: category, color_hex: '#ffffff' };
+      const color = new THREE.Color(meta.color_hex);
+
+      const positions = new Float32Array(list.length * 3);
+      list.forEach((event, i) => {
+        latLonAltToVector3(event.lat, event.lon, 40, tmp);
+        positions.set([tmp.x, tmp.y, tmp.z], i * 3);
+      });
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.PointsMaterial({
+        size: 0.2, map: makeCircleSprite(color.getHex()), transparent: true,
+        depthWrite: false, sizeAttenuation: true,
+      });
+      const points = new THREE.Points(geometry, material);
+      this.earthFrame.add(points);
+
+      const tracks = list.filter((e) => e.track.length > 1).map((event) => {
+        const path = event.track.map((t) => latLonAltToVector3(t.lat, t.lon, 25));
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(path),
+          new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.7 }),
+        );
+        this.earthFrame.add(line);
+        return line;
+      });
+
+      const group = { points, tracks, events: list, material, visible: true };
+      this.eventGroups[category] = group;
+
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'legend-row legend-toggle';
+      row.setAttribute('aria-pressed', 'true');
+      row.innerHTML = `<span class="legend-swatch" style="background:${meta.color_hex};color:${meta.color_hex};"></span>
+        ${escapeHtml(meta.label.toUpperCase())} <span class="legend-count">${list.length}</span>`;
+      row.addEventListener('click', () => {
+        group.visible = !group.visible;
+        points.visible = group.visible;
+        tracks.forEach((line) => { line.visible = group.visible; });
+        row.setAttribute('aria-pressed', String(group.visible));
+      });
+      legend.appendChild(row);
+    }
+    if (events.length === 0) legend.innerHTML = '<div class="dim">NO OPEN EVENTS</div>';
+  }
+
+  _showEventInfo(event) {
+    const magnitude = event.magnitude != null ? `${event.magnitude} ${escapeHtml(event.magnitude_unit || '')}` : '--';
+    const source = event.sources.map((s) => safeHref(s.url) && `<a href="${escapeHtml(safeHref(s.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.id)}</a>`).filter(Boolean).join(' · ');
+    document.getElementById('info-panel').innerHTML = `
+      <table>
+        <tr><td>EVENT</td><td>${escapeHtml(event.title)}</td></tr>
+        <tr><td>TYPE</td><td class="value">${escapeHtml(event.category_title.toUpperCase())}</td></tr>
+        <tr><td>OBSERVED</td><td class="value">${formatUtcShort(event.last_observed)}</td></tr>
+        <tr><td>LAT / LON</td><td class="value">${event.lat.toFixed(2)}&deg; / ${event.lon.toFixed(2)}&deg;</td></tr>
+        <tr><td>MAGNITUDE</td><td class="value">${magnitude}</td></tr>
+        ${event.track.length > 1 ? `<tr><td>TRACK</td><td class="value">${event.track.length} FIXES</td></tr>` : ''}
+      </table>
+      <div class="dim" style="margin-top:4px;">NASA EONET${source ? ` · ${source}` : ''}</div>`;
+  }
+
+  // -------------------------------------------------------------------
+  // Space weather (NASA DONKI): flare / CME / storm summary for the last
+  // two weeks — the same feed that raises space-weather alerts.
+  // -------------------------------------------------------------------
+
+  _initSpaceWeather() {
+    const body = document.getElementById('sw-body');
+    fetch('/api/space-weather/events')
+      .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error(await extractErrorDetail(r)))))
+      .then((data) => { body.innerHTML = this._renderSpaceWeather(data); })
+      .catch((err) => {
+        body.innerHTML = `<div class="dim">DONKI OFFLINE — ${escapeHtml(err.message || err)}</div>`;
+      });
+  }
+
+  _renderSpaceWeather({ days, summary, flares, cmes, storms }) {
+    const flareClass = (cls) => ({ X: 'sw-x', M: 'sw-m' })[(cls || ' ')[0]] || 'sw-c';
+    const events = [
+      ...flares.filter((f) => /^[MX]/.test(f.class || '')).map((f) => ({
+        time: f.peak || f.begin, html: `<span class="${flareClass(f.class)}">${escapeHtml(f.class)}</span> FLARE`,
+      })),
+      ...cmes.filter((c) => c.earth_arrival).map((c) => ({
+        time: c.start, html: `CME ${c.speed_km_s ? `${Math.round(c.speed_km_s)} KM/S` : ''} <span class="sw-m">&rarr; EARTH ${formatUtcShort(c.earth_arrival)}</span>`,
+      })),
+      ...storms.map((st) => ({
+        time: st.start, html: `<span class="sw-x">GEOMAG STORM</span> KP ${st.kp_max ?? '--'}`,
+      })),
+    ].sort((a, b) => (b.time || '').localeCompare(a.time || '')).slice(0, 4);
+
+    const byClass = summary.flares_by_class;
+    return `
+      <table>
+        <tr><td>FLARES ${days}D</td><td class="value">C ${byClass.C} · <span class="sw-m">M ${byClass.M}</span> · <span class="sw-x">X ${byClass.X}</span></td></tr>
+        <tr><td>STRONGEST</td><td class="value ${flareClass(summary.strongest_flare)}">${escapeHtml(summary.strongest_flare || '--')}</td></tr>
+        <tr><td>CMEs</td><td class="value">${summary.cmes} (${summary.earth_directed_cmes} EARTH-BOUND)</td></tr>
+        <tr><td>MAX Kp</td><td class="value">${summary.max_kp ?? '--'}</td></tr>
+      </table>
+      <div class="sw-events">${events.map((e) => `<div>&#9656; ${e.html} <span class="dim">${formatUtcShort(e.time)}</span></div>`).join('')
+        || '<div class="dim">QUIET SUN — NO NOTABLE EVENTS</div>'}</div>`;
   }
 
   // -------------------------------------------------------------------
@@ -1469,7 +1975,7 @@ class Dashboard {
     });
 
     entries.forEach(({ key, meta, state }, i) => {
-      const direction = new THREE.Vector3(...state.direction).normalize();
+      const direction = horizonsToScene(state.direction).normalize();
       const displayDistance = this._displayDistanceUnits(state.distance_km);
       const p = direction.multiplyScalar(displayDistance);
       positions[i * 3] = p.x; positions[i * 3 + 1] = p.y; positions[i * 3 + 2] = p.z;

@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Computer vision and sensor feeds: a YOLOv8 model fine-tuned on NASA imagery, run on real spacecraft footage, plus Deep Space Network, Hubble/JWST, SDO, DSCOVR EPIC and NASA APOD." />
+<meta name="theme-color" content="#0a0a14" />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <title>COSMIC OBSERVER // SENSOR FEEDS</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="retro.css">
@@ -69,6 +72,8 @@
     display: flex; align-items: center; justify-content: center; overflow: hidden;
   }
   .sensor-visual img, .sensor-visual video { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  /* The CV stream scales up to fill the panel (frames arrive at 640-1280 px). */
+  .sensor-visual #video-frame { width: 100%; height: 100%; }
   .sensor-visual .placeholder {
     color: var(--co-cyan); opacity: 0.45; font-size: 12px; letter-spacing: 0.1em; text-align: center; padding: 20px;
   }
@@ -143,9 +148,13 @@
   .crosshair-lock .v-line { left: 50%; top: -20px; bottom: -20px; width: 1px; }
   @keyframes crosshair-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-  #controls-panel .co-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-  #controls-panel label { font-size: 10px; opacity: 0.7; white-space: nowrap; }
-  #controls-panel select, #controls-panel input[type=file] {
+  .co-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .footage-credit { margin-top: 6px; font-size: 9px; line-height: 1.45; opacity: 0.75; }
+  .footage-credit a, .apod-link { color: var(--co-phosphor-green); }
+  .apod-explanation { margin-top: 8px; font-size: 10px; line-height: 1.55; opacity: 0.8; max-height: 38vh; overflow-y: auto; text-transform: none; }
+  .apod-link { display: inline-block; margin-top: 8px; font-size: 10px; text-decoration: none; border-bottom: 1px dotted currentColor; }
+  .co-row label { font-size: 10px; opacity: 0.7; white-space: nowrap; }
+  .co-row select, .co-row input[type=file] {
     background: rgba(0,255,255,0.05); border: 1px solid var(--co-cyan); color: var(--co-cyan);
     font-family: var(--co-font); font-size: 11px; padding: 3px 4px; flex: 1;
   }
@@ -230,7 +239,7 @@
     <button class="tab-btn" data-tab="telescopes">&#128301; TELESCOPES</button>
     <button class="tab-btn" data-tab="solar">&#9728; SOLAR (SDO)</button>
     <button class="tab-btn" data-tab="earth">&#127760; EARTH (EPIC)</button>
-    <button class="tab-btn" data-tab="mars">&#128308; MARS ROVERS</button>
+    <button class="tab-btn" data-tab="apod">&#127756; PICTURE OF THE DAY</button>
   </div>
 
   <div id="tab-panels">
@@ -249,7 +258,8 @@
           <div class="co-row">
             <label>SOURCE</label>
             <select id="cv-source">
-              <option value="iss_live" selected>&#128225; ISS LIVE (NASA)</option>
+              <option value="nasa_footage" selected>&#128640; NASA FOOTAGE — DRAGON CRS-21</option>
+              <option value="iss_live">&#128225; ISS LIVE (NASA)</option>
               <option value="upload">UPLOADED VIDEO</option>
             </select>
           </div>
@@ -260,13 +270,14 @@
           <div class="co-row">
             <label>MODEL</label>
             <select id="cv-model">
-              <option value="coco" selected>COCO (general objects)</option>
-              <option value="space">SPACE FINE-TUNE (experimental)</option>
+              <option value="space" selected>SPACE FINE-TUNE (this project)</option>
+              <option value="coco">COCO (general objects)</option>
             </select>
           </div>
           <button class="co-btn" id="cv-upload-btn">UPLOAD VIDEO</button>
           <button class="co-btn" id="cv-start-btn">&#9654; START STREAM</button>
           <div id="cv-status" class="dim"></div>
+          <div id="footage-credit" class="footage-credit"></div>
         </div>
 
         <div id="space-model-panel" class="co-panel">
@@ -452,30 +463,25 @@
       </div>
     </div>
 
-    <!-- ============================== MARS ================================= -->
-    <div class="tab-panel" id="panel-mars">
+    <!-- ============================== APOD ================================= -->
+    <div class="tab-panel" id="panel-apod">
       <div class="panel-main">
-        <div class="co-panel scroll-fill-panel" style="flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <h3 style="margin:0;">LATEST ROVER IMAGERY</h3>
-            <div style="display:flex; gap:6px;">
-              <button class="co-btn small active" id="mars-rover-curiosity" data-rover="curiosity">CURIOSITY</button>
-              <button class="co-btn small" id="mars-rover-perseverance" data-rover="perseverance">PERSEVERANCE</button>
-            </div>
-          </div>
-          <div class="rover-grid" id="rover-grid"><div class="dim">CONNECTING&hellip;</div></div>
+        <div class="sensor-visual" id="apod-visual">
+          <div class="placeholder" id="apod-placeholder">CONNECTING&hellip;</div>
+          <img id="apod-img" style="display:none;" alt="" />
         </div>
       </div>
       <div class="panel-side">
         <div class="co-panel">
-          <h3>ROVER STATUS</h3>
+          <h3>ASTRONOMY PICTURE OF THE DAY</h3>
           <table class="telemetry-table">
-            <tr><td>ROVER</td><td class="value" id="mars-rover-name">CURIOSITY</td></tr>
-            <tr><td>STATUS</td><td class="value" id="mars-rover-status">--</td></tr>
-            <tr><td>LATEST SOL</td><td class="value" id="mars-rover-sol">--</td></tr>
-            <tr><td>SIGNAL</td><td class="value" id="mars-signal">--</td></tr>
+            <tr><td>TITLE</td><td class="value" id="apod-title">--</td></tr>
+            <tr><td>DATE</td><td class="value" id="apod-date">--</td></tr>
+            <tr><td>CREDIT</td><td class="value" id="apod-credit">--</td></tr>
+            <tr><td>SIGNAL</td><td class="value" id="apod-signal">--</td></tr>
           </table>
-          <div class="dim" style="margin-top:8px;font-size:9px;">NASA's Mars Rover Photos API has known intermittent reliability issues — a real outage shows here honestly, no substitute imagery.</div>
+          <div class="apod-explanation" id="apod-explanation"></div>
+          <a class="apod-link" id="apod-link" target="_blank" rel="noopener noreferrer" style="display:none;">OPEN FULL RESOLUTION &#8599;</a>
         </div>
       </div>
     </div>
@@ -483,8 +489,8 @@
   </div>
 
   <div id="bottom-panel" class="co-panel">
-    YOLOv8n (COCO-pretrained) &middot; Non-Max Suppression + confidence thresholding &middot;
-    Upload your own clip for custom testing &middot; All other feeds are real NASA/JPL/STScI/NOAA data — see each tab's SIGNAL indicator
+    YOLOv8n fine-tuned on NASA imagery (or COCO-pretrained) &middot; Non-Max Suppression + confidence thresholding &middot;
+    Footage: NASA Image and Video Library &middot; All other feeds are real NASA/JPL/STScI/NOAA data — see each tab's SIGNAL indicator
   </div>
 </div>
 

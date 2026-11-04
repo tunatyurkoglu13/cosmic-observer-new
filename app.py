@@ -42,13 +42,17 @@ from core.tle_manager import GROUPS, TLEManager
 from cv.fits_ingest import is_fits_path, load_fits_image
 from cv.hud import draw_label, draw_reticle
 from cv.iss_live import resolve_iss_stream_url
+from cv.nasa_footage import CLIPS as FOOTAGE_CLIPS, DEFAULT_CLIP as DEFAULT_FOOTAGE_CLIP, open_clip
 from cv.open_vocabulary import DEFAULT_SPACE_QUERIES, OpenVocabularyDetector
 from cv.streak_detection import draw_streaks, detect_streaks
 from cv.streamer import SPACE_FINE_TUNED_WEIGHTS_PATH, FrameProcessor, build_sample_video, encode_jpeg
+from data.apod import APODClient
+from data.donki import DONKIClient, assess_cme, assess_flare, assess_storm
 from data.dscovr_epic import EPICClient
 from data.dsn import DSNClient
-from data.mars_rover_photos import ROVERS as MARS_ROVERS, MarsRoverPhotosClient
+from data.eonet import EONETClient
 from data.nasa_cneos import CNEOSClient
+from data.nasa_imagery import NasaImageryClient
 from data.neows import NeoWsClient
 from data.sbdb import SBDBClient
 from data.small_bodies import CURATED_BODIES as SMALL_BODIES, SmallBodyTracker
@@ -278,10 +282,48 @@ async def _scan_neo_alerts_once() -> None:
         pass
 
 
+async def _scan_space_weather_alerts_once() -> None:
+    """Real NASA DONKI events: M/X-class flares, Earth-directed CMEs, G1+ geomagnetic storms."""
+    try:
+        recent = await asyncio.to_thread(DONKIClient().fetch_recent, 3)
+    except Exception:
+        return
+
+    candidates = []
+    for flare in recent["flares"]:
+        candidates.append((assess_flare(flare), flare, f"{flare['class']} solar flare",
+                           f"NASA DONKI reports a {flare['class']} flare peaking {flare['peak']} UTC"
+                           + (f" from {flare['source_location']}" if flare["source_location"] else "")
+                           + (f" (active region {flare['active_region']})." if flare["active_region"] else ".")))
+    for cme in recent["cmes"]:
+        speed = f"{cme['speed_km_s']:.0f} km/s" if cme["speed_km_s"] else "unknown speed"
+        candidates.append((assess_cme(cme), cme, f"Earth-directed CME ({speed})",
+                           f"Coronal mass ejection launched {cme['start']} UTC; NASA's WSA-ENLIL model predicts "
+                           f"shock arrival at Earth around {cme['earth_arrival']} UTC."))
+    for storm in recent["storms"]:
+        candidates.append((assess_storm(storm), storm, f"Geomagnetic storm (Kp {storm['kp_max']:g})" if storm["kp_max"] else "",
+                           f"Geomagnetic storm beginning {storm['start']} UTC with observed Kp up to {storm['kp_max']} — "
+                           f"elevated LEO drag and positional uncertainty for tracked objects."))
+
+    for severity, event, title, description in candidates:
+        if severity is None:
+            continue
+        recorded = await asyncio.to_thread(
+            _record_alert,
+            category="space_weather", severity=severity, title=title, description=description,
+            metadata={"donki_id": event["id"], "link": event["link"]},
+            dedup_key=f"space_weather:{event['id']}",
+            cooldown_minutes=7 * 1440.0,  # one alert per DONKI event
+        )
+        if recorded is not None:
+            await _broadcast_alert(recorded)
+
+
 async def _alert_scan_loop() -> None:
     while True:
         await _scan_conjunctions_once()
         await _scan_neo_alerts_once()
+        await _scan_space_weather_alerts_once()
         await asyncio.sleep(ALERT_SCAN_INTERVAL_S)
 
 
@@ -549,14 +591,17 @@ def cola_scan(req: COLAScanRequest):
     site = LAUNCH_SITES[req.site]
     catalog = _fetch_cola_catalog(req.catalog_groups, req.catalog_limit_per_group)
 
-    results = find_cola_launch_windows(
-        site, req.target_inclination_deg, catalog,
-        search_start=req.search_start, search_end=req.search_end,
-        candidate_step=timedelta(minutes=req.candidate_step_minutes),
-        target_altitude_km=req.target_altitude_km, ascent_duration_s=req.ascent_duration_s,
-        max_downrange_km=req.max_downrange_km, bubble_radius_km=req.bubble_radius_km,
-        direction=req.direction,
-    )
+    try:
+        results = find_cola_launch_windows(
+            site, req.target_inclination_deg, catalog,
+            search_start=req.search_start, search_end=req.search_end,
+            candidate_step=timedelta(minutes=req.candidate_step_minutes),
+            target_altitude_km=req.target_altitude_km, ascent_duration_s=req.ascent_duration_s,
+            max_downrange_km=req.max_downrange_km, bubble_radius_km=req.bubble_radius_km,
+            direction=req.direction,
+        )
+    except ValueError as e:  # e.g. target inclination not reachable from the site's latitude
+        raise HTTPException(400, str(e))
 
     return {
         "site": site,
@@ -614,12 +659,15 @@ def cola_trajectory(req: COLATrajectoryRequest):
     grid_end = req.launch_time + timedelta(seconds=req.ascent_duration_s + 30)
     catalog_grid = build_catalog_grid(catalog_sats, req.launch_time, grid_end)
 
-    result = screen_launch_time(
-        site, req.target_inclination_deg, req.launch_time, catalog_grid,
-        target_altitude_km=req.target_altitude_km, ascent_duration_s=req.ascent_duration_s,
-        max_downrange_km=req.max_downrange_km, bubble_radius_km=req.bubble_radius_km,
-        direction=req.direction,
-    )
+    try:
+        result = screen_launch_time(
+            site, req.target_inclination_deg, req.launch_time, catalog_grid,
+            target_altitude_km=req.target_altitude_km, ascent_duration_s=req.ascent_duration_s,
+            max_downrange_km=req.max_downrange_km, bubble_radius_km=req.bubble_radius_km,
+            direction=req.direction,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
     return {
         "launch_time": result.launch_time.isoformat(),
@@ -887,6 +935,8 @@ def sensors_telescope(telescope: str):
         raise HTTPException(404, str(e))
     except requests.RequestException:
         raise HTTPException(503, "MAST archive is currently unreachable — external service outage, try again shortly.")
+    except RuntimeError as e:  # MAST answered, but with nothing usable (e.g. no recent observations)
+        raise HTTPException(503, str(e))
 
 
 @app.get("/api/sensors/telescopes")
@@ -904,27 +954,45 @@ def sensors_earth_epic():
         raise HTTPException(503, "EPIC API is currently unreachable — external service outage, try again shortly.")
 
 
-@app.get("/api/sensors/mars-rover/{rover}")
-def sensors_mars_rover(rover: str):
-    """Most recent real downlinked photos from a Mars rover (data.mars_rover_photos)."""
-    client = MarsRoverPhotosClient()
+@app.get("/api/sensors/apod")
+def sensors_apod():
+    """NASA Astronomy Picture of the Day (data.apod)."""
     try:
-        photos = client.fetch_latest(rover)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
+        return APODClient().fetch_today()
     except requests.RequestException:
-        raise HTTPException(503, "NASA Mars Rover Photos API is currently unreachable — external service outage, try again shortly.")
-    return {"rover": rover, "count": len(photos), "photos": photos}
-
-
-@app.get("/api/sensors/mars-rovers")
-def sensors_mars_rovers_list():
-    return list(MARS_ROVERS)
+        raise HTTPException(503, "NASA APOD is currently unreachable or rate-limited — try again shortly.")
 
 
 # ---------------------------------------------------------------------------
-# Dashboard snapshot (same shape scripts/generate_dashboard_snapshot.py writes to disk)
+# NASA imagery and Earth / space-weather events for the 3D dashboard
 # ---------------------------------------------------------------------------
+
+@app.get("/api/imagery")
+def imagery_layers():
+    """Which real imagery to texture Earth (GIBS), the Moon and Mars (Treks) with — see data.nasa_imagery."""
+    try:
+        return NasaImageryClient().fetch_layers()
+    except requests.RequestException:
+        raise HTTPException(503, "NASA GIBS is currently unreachable — external service outage, try again shortly.")
+
+
+@app.get("/api/earth/events")
+def earth_events(days: int = 30):
+    """Natural events currently tracked from orbit — wildfires, storms, volcanoes, ice (NASA EONET)."""
+    try:
+        return EONETClient().fetch_open_events(max(1, min(days, 90)))
+    except requests.RequestException:
+        raise HTTPException(503, "NASA EONET is currently unreachable — external service outage, try again shortly.")
+
+
+@app.get("/api/space-weather/events")
+def space_weather_events(days: int = 14):
+    """Recent solar flares, CMEs and geomagnetic storms (NASA DONKI)."""
+    try:
+        return DONKIClient().fetch_recent(max(1, min(days, 30)))
+    except requests.RequestException:
+        raise HTTPException(503, "NASA DONKI is currently unreachable or rate-limited — try again shortly.")
+
 
 @app.get("/api/dashboard-snapshot")
 def dashboard_snapshot(active_group: str = "visual", active_limit: int = 200, frames: int = 12, step_hours: float = 1.0):
@@ -1044,6 +1112,19 @@ def _get_open_vocab_detector() -> OpenVocabularyDetector:
 @app.get("/cv")
 def cv_page():
     return FileResponse(f"{STATIC_DIR}/cv.html")
+
+
+@app.get("/api/cv/footage")
+def cv_footage():
+    """The curated NASA Image and Video Library clips available as /ws/cv?source=nasa_footage."""
+    return {
+        "default": DEFAULT_FOOTAGE_CLIP,
+        "clips": {
+            key: {"title": c.title, "recorded": c.recorded, "nasa_id": c.nasa_id, "details_url": c.details_url,
+                  "segments_s": [list(span) for span in c.segments], "step_s": c.step_s}
+            for key, c in FOOTAGE_CLIPS.items()
+        },
+    }
 
 
 @app.get("/api/cv/anomaly-status")
@@ -1217,24 +1298,48 @@ async def _open_video_capture(source: str) -> tuple[cv2.VideoCapture | None, str
             return None, "UPLOAD", f"Could not open uploaded file: {video_path}"
         return cap, "UPLOAD", None
 
+    if source == "nasa_footage":
+        cap, label = await _open_nasa_footage()
+        if cap is not None:
+            return cap, label, None
+        return await _open_sample_capture("NASA Image and Video Library unreachable")
+
     if source == "iss_live":
         try:
             stream = await asyncio.to_thread(resolve_iss_stream_url)
+            cap = await asyncio.to_thread(cv2.VideoCapture, stream.url)
+            if not cap.isOpened():
+                raise RuntimeError("stream could not be opened")
+            return cap, "ISS LIVE", None
         except RuntimeError as e:
-            sample_path = await asyncio.to_thread(build_sample_video)
-            cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
-            return cap, "SAMPLE", f"ISS live stream unavailable ({e}) — showing sample clip instead."
+            reason = f"ISS live stream unavailable ({e})"
 
-        cap = await asyncio.to_thread(cv2.VideoCapture, stream.url)
-        if not cap.isOpened():
-            sample_path = await asyncio.to_thread(build_sample_video)
-            cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
-            return cap, "SAMPLE", "ISS live stream could not be opened — showing sample clip instead."
-        return cap, "ISS LIVE", None
+        # Next best real thing: recorded NASA spacecraft footage.
+        cap, label = await _open_nasa_footage()
+        if cap is not None:
+            return cap, label, f"{reason} — showing recorded NASA footage instead."
+        return await _open_sample_capture(reason)
 
     sample_path = await asyncio.to_thread(build_sample_video)
     cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
     return cap, "SAMPLE", None
+
+
+async def _open_nasa_footage():
+    """(capture, label) for the default NASA library clip, or (None, None) if it can't be opened."""
+    try:
+        cap = await asyncio.to_thread(open_clip, DEFAULT_FOOTAGE_CLIP)
+    except (requests.RequestException, RuntimeError, KeyError):
+        return None, None
+    if not cap.isOpened():
+        return None, None
+    return cap, f"NASA {cap.clip.recorded}"
+
+
+async def _open_sample_capture(reason: str):
+    sample_path = await asyncio.to_thread(build_sample_video)
+    cap = await asyncio.to_thread(cv2.VideoCapture, str(sample_path))
+    return cap, "SAMPLE", f"{reason} — showing sample clip instead."
 
 
 @app.websocket("/ws/cv")
@@ -1299,6 +1404,9 @@ async def _run_cv_stream(websocket: WebSocket, source: str, target_fps: float, m
     target_fps = min(target_fps, MAX_CV_FPS)
     interval_s = 1.0 / target_fps if target_fps > 0 else 0.1
     is_live = label == "ISS LIVE"
+    # The anomaly autoencoder models the ISS camera: score the live feed and
+    # user uploads (which may well be ISS footage), not curated clips.
+    score_anomaly = is_live or label == "UPLOAD"
     last_anomaly_sample_time = 0.0
     ANOMALY_SAMPLE_INTERVAL_S = 5.0  # throttled — a continuous per-frame trend, not one row per frame
 
@@ -1329,7 +1437,7 @@ async def _run_cv_stream(websocket: WebSocket, source: str, target_fps: float, m
                         await websocket.send_json({"error": "Video ended and could not be replayed"})
                         break
 
-            result = await asyncio.to_thread(processor.process, frame, label)
+            result = await asyncio.to_thread(processor.process, frame, label, score_anomaly)
             jpeg_bytes = await asyncio.to_thread(encode_jpeg, result.frame_bgr)
 
             anomaly_payload = None
@@ -1349,6 +1457,10 @@ async def _run_cv_stream(websocket: WebSocket, source: str, target_fps: float, m
                         "threshold": result.anomaly.threshold,
                         "severity": result.anomaly.severity,
                     })
+                # Alerts and metric history describe what's being observed
+                # right now — recorded footage, uploads and the sample clip
+                # still show their anomaly scores, but don't raise alerts.
+                if result.anomaly.is_anomaly and is_live:
                     recorded = _alert_store.record(
                         category="anomaly",
                         severity="critical" if result.anomaly.severity >= 1.0 else "warning",
@@ -1370,7 +1482,7 @@ async def _run_cv_stream(websocket: WebSocket, source: str, target_fps: float, m
                         await _broadcast_alert(recorded)
 
                 now_s = time.monotonic()
-                if now_s - last_anomaly_sample_time >= ANOMALY_SAMPLE_INTERVAL_S:
+                if is_live and now_s - last_anomaly_sample_time >= ANOMALY_SAMPLE_INTERVAL_S:
                     last_anomaly_sample_time = now_s
                     _timeseries_store.record(
                         "cv_anomaly_score", result.anomaly.reconstruction_error,
@@ -1387,6 +1499,10 @@ async def _run_cv_stream(websocket: WebSocket, source: str, target_fps: float, m
                 "frame_index": result.metrics.frame_index,
                 "avg_confidence": result.metrics.avg_confidence,
                 "anomaly": anomaly_payload,
+                "anomaly_mode": (
+                    "unavailable" if processor.anomaly_detector is None
+                    else "scored" if score_anomaly else "iss_only"
+                ),
             })
             await asyncio.sleep(interval_s)
     except WebSocketDisconnect:

@@ -3,6 +3,13 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Real-time space situational awareness: live satellite tracking, conjunction screening, launch collision avoidance and NEO risk — built on real NASA, JPL and NOAA data." />
+<meta name="theme-color" content="#0a0a14" />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Cosmic Observer — Space Situational Awareness" />
+<meta property="og:description" content="Real-time space situational awareness: live satellite tracking, conjunction screening, launch collision avoidance and NEO risk — built on real NASA, JPL and NOAA data." />
+<meta name="twitter:card" content="summary_large_image" />
 <title>COSMIC OBSERVER</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="retro.css">
@@ -51,7 +58,29 @@
   .legend-subhead { opacity: 0.55; font-size: 10px; letter-spacing: 0.1em; margin: 10px 0 4px 0; }
   .legend-subhead:first-child { margin-top: 0; }
 
+  #right-sidebar { overflow-y: auto; }
   #info-panel { flex-shrink: 0; }
+  #info-panel a { color: var(--co-phosphor-green); }
+
+  .imagery-credit { margin-top: 4px; font-size: 9px; letter-spacing: 0.06em; color: var(--co-phosphor-green); opacity: 0.75; }
+
+  .legend-toggle {
+    width: 100%; background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+    font: inherit; color: inherit; letter-spacing: inherit;
+  }
+  .legend-toggle[aria-pressed="false"] { opacity: 0.35; }
+  .legend-toggle:hover { color: var(--co-phosphor-green); }
+  .legend-toggle:focus-visible { outline: 1px solid var(--co-cyan); outline-offset: 2px; }
+  .legend-count { margin-left: auto; opacity: 0.6; }
+
+  #spaceweather-panel h3 { font-size: 12px; letter-spacing: 0.1em; margin: 0 0 8px 0; color: var(--co-amber); }
+  #spaceweather-panel table { border-collapse: collapse; width: 100%; }
+  #spaceweather-panel td { padding: 1px 6px 1px 0; vertical-align: top; }
+  #spaceweather-panel td:first-child { color: var(--co-amber); white-space: nowrap; }
+  .sw-events { margin-top: 6px; font-size: 10px; line-height: 1.6; }
+  .sw-m { color: var(--co-amber); }
+  .sw-x { color: var(--co-alert-emergency); }
+  .sw-c { color: var(--co-phosphor-green); }
   #info-panel table { border-collapse: collapse; width: 100%; }
   #info-panel td { padding: 2px 6px 2px 0; vertical-align: top; }
   #info-panel td:first-child { color: var(--co-amber); white-space: nowrap; }
@@ -194,7 +223,9 @@
     <div id="celestial-panel" class="co-panel">
       <h3>CELESTIAL BODY</h3>
       <div class="mp-row"><label>DESTINATION</label><select id="body-select"><option value="earth">EARTH</option></select></div>
+      <div class="mp-row"><label>EARTH LAYER</label><select id="earth-layer"><option value="true_color">NASA TRUE COLOR</option><option value="holo">HOLOGRAPHIC</option></select></div>
       <div id="celestial-status" class="dim">EARTH — HOME VIEW</div>
+      <div id="imagery-credit" class="imagery-credit">CONNECTING TO NASA GIBS…</div>
     </div>
 
     <div id="mission-planner-panel" class="co-panel">
@@ -221,6 +252,9 @@
       <div class="legend-row"><span class="legend-swatch" style="background: #cc66ff; color: #cc66ff;"></span> ASTEROID/COMET (real, JPL SBDB)</div>
       <div class="legend-row"><span class="legend-swatch" style="background: #b8b3aa; color: #b8b3aa;"></span> MOON (real, JPL Horizons)</div>
 
+      <div class="legend-subhead">EARTH EVENTS (NASA EONET) — CLICK TO TOGGLE</div>
+      <div id="event-legend"><div class="dim">LOADING…</div></div>
+
       <div class="legend-subhead">LINES</div>
       <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-cyan); color: var(--co-cyan); opacity: 0.85;"></span> CONTINENT OUTLINE</div>
       <div class="legend-row"><span class="legend-swatch line" style="background: var(--co-amber); color: var(--co-amber);"></span> STATION ORBIT PATH (1 rev)</div>
@@ -238,6 +272,11 @@
         <tr><td>EPOCH (UTC)</td><td class="value" id="stat-epoch">--</td></tr>
       </table>
     </div>
+
+    <div id="spaceweather-panel" class="co-panel">
+      <h3>SPACE WEATHER · NASA DONKI</h3>
+      <div id="sw-body" class="dim">LOADING…</div>
+    </div>
   </div>
 
   <div id="time-panel" class="co-panel">
@@ -254,7 +293,7 @@
   "imports": {
     "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
     "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
-    "topojson-client": "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm"
+    "topojson-client": "https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/+esm"
   }
 }
 </script>

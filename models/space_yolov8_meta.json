@@ -1,0 +1,41 @@
+{
+  "classes": [
+    "satellite",
+    "spacecraft",
+    "iss",
+    "dragon",
+    "soyuz",
+    "debris",
+    "unknown"
+  ],
+  "n_train_images": 109,
+  "n_val_images": 27,
+  "epochs": 30,
+  "imgsz": 640,
+  "batch": 8,
+  "base_checkpoint": "yolov8n.pt (COCO-pretrained)",
+  "class_queries": {
+    "satellite": "satellite",
+    "spacecraft": "spacecraft",
+    "iss": "International Space Station",
+    "dragon": "SpaceX Dragon capsule",
+    "soyuz": "Soyuz spacecraft",
+    "debris": "space debris"
+  },
+  "zero_shot_label_queries": [
+    "a satellite in orbit",
+    "a spacecraft",
+    "the International Space Station",
+    "a SpaceX Dragon capsule",
+    "a Soyuz spacecraft",
+    "space debris"
+  ],
+  "final_metrics": {
+    "mAP50": 0.22504136379170073,
+    "mAP50-95": 0.1547768617391112,
+    "precision": 0.624215522623328,
+    "recall": 0.18767441860465114
+  },
+  "run_dir": "/Users/tunatyurkoglu/cosmic-observer/runs/detect/train",
+  "label_provenance": "Images: real NASA Images API (images.nasa.gov) photographs. Labels: DRAFT boxes from the zero-shot OWL-ViT detector (cv.open_vocabulary), NOT human-verified ground truth. This is an honest bootstrap dataset, not a SPARK/SPEED+-grade academic dataset (explicitly out of scope this round)."
+}
