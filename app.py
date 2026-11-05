@@ -46,13 +46,13 @@ from cv.nasa_footage import CLIPS as FOOTAGE_CLIPS, DEFAULT_CLIP as DEFAULT_FOOT
 from cv.open_vocabulary import DEFAULT_SPACE_QUERIES, OpenVocabularyDetector
 from cv.streak_detection import draw_streaks, detect_streaks
 from cv.streamer import SPACE_FINE_TUNED_WEIGHTS_PATH, FrameProcessor, build_sample_video, encode_jpeg
-from data.apod import APODClient
 from data.donki import DONKIClient, assess_cme, assess_flare, assess_storm
 from data.dscovr_epic import EPICClient
 from data.dsn import DSNClient
 from data.eonet import EONETClient
 from data.nasa_cneos import CNEOSClient
 from data.nasa_imagery import NasaImageryClient
+from data.nasa_library import COLLECTIONS as GALLERY_COLLECTIONS, DEFAULT_COLLECTION as DEFAULT_GALLERY, NasaLibraryClient
 from data.neows import NeoWsClient
 from data.sbdb import SBDBClient
 from data.small_bodies import CURATED_BODIES as SMALL_BODIES, SmallBodyTracker
@@ -960,15 +960,24 @@ def sensors_earth_epic():
         raise HTTPException(503, "EPIC API is currently unreachable — external service outage, try again shortly.")
 
 
-@app.get("/api/sensors/apod")
-def sensors_apod():
-    """NASA Astronomy Picture of the Day (data.apod)."""
+@app.get("/api/sensors/nasa-gallery")
+def sensors_gallery_collections():
+    """The curated NASA Image and Video Library collections (data.nasa_library)."""
+    return {
+        "default": DEFAULT_GALLERY,
+        "collections": {key: {"label": meta["label"], "query": meta["query"]} for key, meta in GALLERY_COLLECTIONS.items()},
+    }
+
+
+@app.get("/api/sensors/nasa-gallery/{collection}")
+def sensors_gallery(collection: str):
+    """Recent NASA imagery for one collection, newest first."""
     try:
-        return APODClient().fetch_today()
+        return NasaLibraryClient().fetch_collection(collection)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     except requests.RequestException:
-        raise HTTPException(503, "NASA APOD is currently unreachable or rate-limited — try again shortly.")
-    except RuntimeError as e:  # APOD answered, but with placeholder data
-        raise HTTPException(503, str(e))
+        raise HTTPException(503, "NASA Image and Video Library is currently unreachable — try again shortly.")
 
 
 # ---------------------------------------------------------------------------

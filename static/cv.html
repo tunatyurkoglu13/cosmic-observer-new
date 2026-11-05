@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta name="description" content="Computer vision and sensor feeds: a YOLOv8 model fine-tuned on NASA imagery, run on real spacecraft footage, plus Deep Space Network, Hubble/JWST, SDO, DSCOVR EPIC and NASA APOD." />
+<meta name="description" content="Computer vision and sensor feeds: a YOLOv8 model fine-tuned on NASA imagery, run on real spacecraft footage, plus Deep Space Network, Hubble/JWST, SDO, DSCOVR EPIC and a gallery of recent NASA imagery." />
 <meta name="theme-color" content="#0a0a14" />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <title>COSMIC OBSERVER // SENSOR FEEDS</title>
@@ -52,7 +52,9 @@
   /* --------------------------------------------------------------- */
   /* Tab panels — shared two-column (main visual + side telemetry) layout */
   /* --------------------------------------------------------------- */
-  #tab-panels { min-height: 0; position: relative; }
+  /* min-width: 0 lets wide content (the gallery's thumbnail strip) scroll inside
+     the panel instead of stretching the 1fr grid column past the viewport. */
+  #tab-panels { min-height: 0; min-width: 0; position: relative; }
   .tab-panel { display: none; height: 100%; gap: 16px; }
   .tab-panel.active { display: flex; }
 
@@ -128,15 +130,6 @@
   .dsn-dish-row .dish-rate { color: var(--co-amber); }
   .dsn-dish-row .dish-meta { opacity: 0.6; font-size: 9px; }
 
-  .rover-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; overflow-y: auto; flex: 1; min-height: 0; }
-  .rover-photo { position: relative; border: 1px solid var(--co-cyan); background: #000; aspect-ratio: 4/3; overflow: hidden; }
-  .rover-photo img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(0.15) contrast(1.05); }
-  .rover-photo::before {
-    content: ''; position: absolute; inset: 0; z-index: 2; pointer-events: none;
-    background: repeating-linear-gradient(to bottom, rgba(0,255,255,0.06) 0px, rgba(0,255,255,0.06) 1px, transparent 1px, transparent 3px);
-  }
-  .rover-photo .rover-caption { position: absolute; bottom: 0; left: 0; right: 0; z-index: 3; font-size: 9px; padding: 3px 5px; background: rgba(0,10,12,0.75); letter-spacing: 0.05em; }
-
   .crosshair-lock {
     position: relative; width: 140px; height: 140px; margin: 0 auto;
   }
@@ -150,9 +143,51 @@
 
   .co-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
   .footage-credit { margin-top: 6px; font-size: 9px; line-height: 1.45; opacity: 0.75; }
-  .footage-credit a, .apod-link { color: var(--co-phosphor-green); }
-  .apod-explanation { margin-top: 8px; font-size: 10px; line-height: 1.55; opacity: 0.8; max-height: 38vh; overflow-y: auto; text-transform: none; }
-  .apod-link { display: inline-block; margin-top: 8px; font-size: 10px; text-decoration: none; border-bottom: 1px dotted currentColor; }
+  .footage-credit a { color: var(--co-phosphor-green); }
+
+  /* NASA gallery ---------------------------------------------------- */
+  .gallery-stage #gallery-img {
+    width: 100%; height: 100%; object-fit: contain;
+    opacity: 0; transform: scale(1.015); transition: opacity 0.45s ease, transform 0.6s ease;
+  }
+  .gallery-stage #gallery-img.ready { opacity: 1; transform: none; }
+  .gallery-stage .placeholder { position: absolute; z-index: 4; }
+  .gallery-stage .hud-corner.bl { max-width: 70%; color: var(--co-phosphor-green); }
+  .gallery-nav {
+    position: absolute; top: 50%; z-index: 5; transform: translateY(-50%);
+    width: 38px; height: 64px; border: 1px solid rgba(0,255,255,0.45); background: rgba(0,10,14,0.55);
+    color: var(--co-cyan); font: 28px/1 var(--co-font); cursor: pointer; opacity: 0.7;
+    transition: opacity 0.2s, background 0.2s;
+  }
+  .gallery-nav:hover, .gallery-nav:focus-visible { opacity: 1; background: rgba(0,255,255,0.15); outline: none; }
+  .gallery-nav.prev { left: 10px; }
+  .gallery-nav.next { right: 10px; }
+  .gallery-strip {
+    display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 6px; flex-shrink: 0;
+    scrollbar-width: thin; scrollbar-color: rgba(0,255,255,0.35) transparent;
+  }
+  .gallery-thumb {
+    flex: 0 0 auto; width: 112px; height: 70px; padding: 0; position: relative; cursor: pointer;
+    border: 1px solid rgba(0,255,255,0.25); background: #000; opacity: 0.55;
+    transition: opacity 0.2s, border-color 0.2s;
+  }
+  .gallery-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .gallery-thumb:hover, .gallery-thumb:focus-visible { opacity: 0.9; outline: none; }
+  .gallery-thumb[aria-current="true"] { opacity: 1; border-color: var(--co-phosphor-green); box-shadow: 0 0 10px rgba(0,255,102,0.35); }
+  .gallery-collections { display: flex; flex-wrap: wrap; gap: 6px; }
+  .gallery-collections .co-btn { width: auto; margin: 0; flex: 1 1 calc(50% - 6px); }
+  .gallery-description {
+    margin-top: 10px; font-size: 10px; line-height: 1.6; opacity: 0.85; text-transform: none;
+    max-height: 30vh; overflow-y: auto; padding-right: 4px;
+  }
+  .gallery-link {
+    display: inline-block; margin-top: 10px; font-size: 10px; letter-spacing: 0.06em;
+    color: var(--co-phosphor-green); text-decoration: none; border-bottom: 1px dotted currentColor;
+  }
+  .gallery-link:hover { border-bottom-style: solid; }
+  @media (prefers-reduced-motion: reduce) {
+    .gallery-stage #gallery-img { transition: none; transform: none; }
+  }
   .co-row label { font-size: 10px; opacity: 0.7; white-space: nowrap; }
   .co-row select, .co-row input[type=file] {
     background: rgba(0,255,255,0.05); border: 1px solid var(--co-cyan); color: var(--co-cyan);
@@ -210,7 +245,6 @@
     #detections-panel { flex: none; min-height: auto; overflow: visible; }
     #detections-list { flex: none; max-height: 40vh; overflow-y: auto; }
     #anomaly-log { max-height: 30vh; }
-    .rover-grid { flex: none; }
     #tab-panels { min-height: auto; }
     .scroll-fill-panel { flex: none !important; min-height: auto !important; overflow: visible !important; }
     .scroll-fill-inner { flex: none !important; min-height: auto !important; max-height: 50vh; }
@@ -239,7 +273,7 @@
     <button class="tab-btn" data-tab="telescopes">&#128301; TELESCOPES</button>
     <button class="tab-btn" data-tab="solar">&#9728; SOLAR (SDO)</button>
     <button class="tab-btn" data-tab="earth">&#127760; EARTH (EPIC)</button>
-    <button class="tab-btn" data-tab="apod">&#127756; PICTURE OF THE DAY</button>
+    <button class="tab-btn" data-tab="gallery">&#128247; NASA GALLERY</button>
   </div>
 
   <div id="tab-panels">
@@ -463,25 +497,36 @@
       </div>
     </div>
 
-    <!-- ============================== APOD ================================= -->
-    <div class="tab-panel" id="panel-apod">
+    <!-- =========================== NASA GALLERY ============================ -->
+    <div class="tab-panel" id="panel-gallery">
       <div class="panel-main">
-        <div class="sensor-visual" id="apod-visual">
-          <div class="placeholder" id="apod-placeholder">CONNECTING&hellip;</div>
-          <img id="apod-img" style="display:none;" alt="" />
+        <div class="sensor-visual gallery-stage" id="gallery-stage">
+          <div class="placeholder" id="gallery-placeholder">CONNECTING TO NASA IMAGE LIBRARY&hellip;</div>
+          <img id="gallery-img" alt="" />
+          <div class="hud-corner tl hud-rec"><span class="dot"></span>NASA IMAGE LIBRARY</div>
+          <div class="hud-corner tr" id="gallery-counter"></div>
+          <div class="hud-corner bl" id="gallery-caption"></div>
+          <button class="gallery-nav prev" id="gallery-prev" type="button" aria-label="Previous image">&#8249;</button>
+          <button class="gallery-nav next" id="gallery-next" type="button" aria-label="Next image">&#8250;</button>
         </div>
+        <div class="gallery-strip" id="gallery-strip" aria-label="Images in this collection"></div>
       </div>
       <div class="panel-side">
         <div class="co-panel">
-          <h3>ASTRONOMY PICTURE OF THE DAY</h3>
+          <h3>COLLECTION</h3>
+          <div class="gallery-collections" id="gallery-collections"></div>
+        </div>
+        <div class="co-panel gallery-meta">
+          <h3>IMAGE RECORD</h3>
           <table class="telemetry-table">
-            <tr><td>TITLE</td><td class="value" id="apod-title">--</td></tr>
-            <tr><td>DATE</td><td class="value" id="apod-date">--</td></tr>
-            <tr><td>CREDIT</td><td class="value" id="apod-credit">--</td></tr>
-            <tr><td>SIGNAL</td><td class="value" id="apod-signal">--</td></tr>
+            <tr><td>TITLE</td><td class="value" id="gallery-title">--</td></tr>
+            <tr><td>DATE</td><td class="value" id="gallery-date">--</td></tr>
+            <tr><td>CENTER</td><td class="value" id="gallery-center">--</td></tr>
+            <tr><td>CREDIT</td><td class="value" id="gallery-credit">--</td></tr>
+            <tr><td>SIGNAL</td><td class="value" id="gallery-signal">--</td></tr>
           </table>
-          <div class="apod-explanation" id="apod-explanation"></div>
-          <a class="apod-link" id="apod-link" target="_blank" rel="noopener noreferrer" style="display:none;">OPEN FULL RESOLUTION &#8599;</a>
+          <div class="gallery-description" id="gallery-description"></div>
+          <a class="gallery-link" id="gallery-link" target="_blank" rel="noopener noreferrer" hidden>VIEW ON IMAGES.NASA.GOV &#8599;</a>
         </div>
       </div>
     </div>

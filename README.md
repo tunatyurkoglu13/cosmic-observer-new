@@ -27,7 +27,7 @@ CelesTrak, on a globe wearing the latest real satellite imagery of Earth.
 | **Near-Earth objects** | JPL Sentry risk list, CNEOS close approaches, SBDB orbital elements propagated for curated asteroids and comets |
 | **Computer vision** | A YOLOv8 fine-tune on NASA imagery run on real docking footage streamed from the NASA Image and Video Library (range requests, never downloaded), OWL-ViT zero-shot detection, an ISS-camera anomaly autoencoder, streak detection on FITS frames with WCS sky coordinates |
 | **Planetary surfaces** | Moon (LRO WAC) and Mars (Viking MDIM 2.1) mosaics from NASA Solar System Treks, stitched client-side and lit by each body's real Sun direction |
-| **Sensor feeds** | Deep Space Network status, latest Hubble/JWST observations (MAST), SDO solar imagery, DSCOVR EPIC Earth images, NASA Astronomy Picture of the Day |
+| **Sensor feeds** | Deep Space Network status, latest Hubble/JWST observations (MAST), SDO solar imagery, DSCOVR EPIC Earth images, and a curated gallery of recent NASA Image and Video Library releases |
 | **Alerting** | Background scans persist deduplicated alerts and push them over WebSockets, with optional webhook delivery |
 
 | | |
@@ -123,7 +123,7 @@ pytest -m network                      # against the real external APIs
 app.py              FastAPI app: REST, WebSockets, background loops
 core/               orbital mechanics, propagation, collision probability, stores
 stm/                conjunction screening, COLA, keep-out zones, debris maps
-data/               clients for CelesTrak, NASA (GIBS, Treks, EONET, DONKI, APOD), JPL, NOAA, MAST, DSN
+data/               clients for CelesTrak, NASA (GIBS, Treks, EONET, DONKI, Image Library), JPL, NOAA, MAST, DSN
 cv/                 detection, tracking, anomaly model, NASA footage source, FITS ingest, HUD
 models/             trained checkpoints the app serves (space fine-tune, anomaly autoencoder)
 reports/            risk, statistics and launch-analysis reports
@@ -142,7 +142,6 @@ tests/              pytest suite
 [NASA EONET](https://eonet.gsfc.nasa.gov) ·
 [NASA DONKI](https://kauai.ccmc.gsfc.nasa.gov/DONKI/) ·
 [NASA Image and Video Library](https://images.nasa.gov) ·
-[NASA APOD](https://apod.nasa.gov) ·
 [NOAA SWPC](https://www.swpc.noaa.gov) ·
 [NASA DSN Now](https://eyes.nasa.gov/dsn/) ·
 [MAST](https://archive.stsci.edu) ·

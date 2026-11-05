@@ -8,7 +8,7 @@ import requests
 from PIL import Image
 
 from core.resilient_fetch import JsonFileFetcher
-from data import apod, donki, eonet, nasa_imagery
+from data import donki, eonet, nasa_imagery, nasa_library
 
 
 def _jpeg(pixels: np.ndarray) -> bytes:
@@ -166,19 +166,6 @@ def test_donki_client_summarizes_events(tmp_path):
     assert result["flares"][0]["id"] == "f2"  # most recent first
 
 
-# --- APOD ------------------------------------------------------------------
-
-def test_apod_keeps_only_known_fields_and_tidies_credit(tmp_path, monkeypatch):
-    monkeypatch.setenv("NASA_API_KEY", "k")
-    raw = {"date": "2026-11-04", "title": "T", "media_type": "image", "url": "https://apod/x.jpg",
-           "copyright": "\nJane  Doe\n", "service_version": "v1"}
-    with patch("data.apod.requests.get", return_value=_response(raw)) as get:
-        result = apod.APODClient(cache_path=tmp_path / "a.json").fetch_today()
-    assert result["copyright"] == "Jane Doe"
-    assert "service_version" not in result
-    assert get.call_args.kwargs["headers"] == {"X-Api-Key": "k"}
-
-
 # --- JsonFileFetcher -------------------------------------------------------
 
 class _CountingFetcher(JsonFileFetcher[dict]):
@@ -250,11 +237,37 @@ def test_resolve_clip_url_picks_rendition_over_https():
     assert url.startswith("https://") and url.endswith("~large.mp4")
 
 
-def test_apod_rejects_placeholder_payload_without_caching_it(tmp_path):
-    raw = {"date": "2026-11-04", "title": "NASA Science", "media_type": "image", "explanation": "IC 342...",
-           "url": "https://science.nasa.gov/wp-content/themes/nasa-child/assets/images/nasa-logo@2x.png"}
-    client = apod.APODClient(cache_path=tmp_path / "a.json")
-    with patch("data.apod.requests.get", return_value=_response(raw)):
-        with pytest.raises(RuntimeError, match="placeholder"):
-            client.fetch_today()
-    assert client._load_cache(client.KEY) is None
+
+
+# --- NASA Image and Video Library gallery ----------------------------------
+
+def _library_item(nasa_id, title, created, description="", renditions=("~large.jpg", "~medium.jpg")):
+    return {
+        "data": [{"nasa_id": nasa_id, "title": title, "date_created": created, "center": "JSC",
+                  "description": description}],
+        "links": [{"href": f"http://images-assets.nasa.gov/image/{nasa_id}/{nasa_id}{r}"} for r in renditions],
+    }
+
+
+def test_library_item_normalizes_renditions_and_description():
+    raw = _library_item("iss1", "Dragon approach", "2026-10-15T00:00:00Z",
+                        description='A <a href="https://x">SpaceX</a> Dragon &amp; the ISS.\n\n  Credit: NASA')
+    item = nasa_library.normalize_item(raw)
+    assert item["image_url"].startswith("https://") and item["image_url"].endswith("~medium.jpg")
+    assert item["thumb_url"] == item["image_url"]  # no ~thumb rendition -> falls back to the image
+    assert item["description"] == "A SpaceX Dragon & the ISS. Credit: NASA"
+    assert item["details_url"] == "https://images.nasa.gov/details/iss1"
+    assert nasa_library.normalize_item(_library_item("x", "t", "2026-01-01", renditions=("~orig.tif",))) is None
+
+
+def test_curate_sorts_newest_first_and_drops_burst_duplicates():
+    items = [nasa_library.normalize_item(_library_item(i, t, d)) for i, t, d in [
+        ("a", "Launch", "2026-10-01"), ("b", "Dragon approach", "2026-10-15"),
+        ("c", "Dragon Approach", "2026-10-15"), ("d", "Spacewalk", "2026-10-20"),
+    ]]
+    assert [i["nasa_id"] for i in nasa_library.curate(items)] == ["d", "b", "a"]
+
+
+def test_library_client_rejects_unknown_collection(tmp_path):
+    with pytest.raises(ValueError):
+        nasa_library.NasaLibraryClient(cache_path=tmp_path / "g.json").fetch_collection("nope")

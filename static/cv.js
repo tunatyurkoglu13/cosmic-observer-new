@@ -84,7 +84,6 @@ const TAB_REFRESH_MS = {
   telescopes: 5 * 60 * 1000,
   solar: 5 * 60 * 1000,
   earth: 10 * 60 * 1000,
-  apod: 60 * 60 * 1000,
 };
 
 const tabLoaders = {
@@ -92,7 +91,7 @@ const tabLoaders = {
   telescopes: loadTelescopes,
   solar: loadSolar,
   earth: loadEarth,
-  apod: loadApod,
+  gallery: loadGallery,
 };
 
 let activeRefreshTimer = null;
@@ -570,9 +569,9 @@ async function loadEarth() {
 initCRTNoise(document.getElementById('earth-visual'));
 
 // ===========================================================================
-// Tab: PICTURE OF THE DAY — NASA APOD (an image, or a video shown as its
-// thumbnail linking out: embedding third-party players is deliberately
-// avoided, the page's CSP allows no frames).
+// Tab: NASA GALLERY — recent imagery from the NASA Image and Video Library
+// (data/nasa_library.py), in curated collections. Text from the library is
+// only ever set via textContent, and links must be http(s).
 // ===========================================================================
 
 function safeHttpUrl(url) {
@@ -584,40 +583,129 @@ function safeHttpUrl(url) {
   }
 }
 
-async function loadApod() {
-  const img = document.getElementById('apod-img');
-  const ph = document.getElementById('apod-placeholder');
-  const link = document.getElementById('apod-link');
+const gallery = { collections: null, key: null, items: [], index: 0 };
+
+async function loadGallery() {
+  if (gallery.collections) return; // collections refresh server-side; nothing to poll
   try {
-    const data = await fetchJson('/api/sensors/apod');
-    const imageUrl = safeHttpUrl(data.media_type === 'image' ? data.url : data.thumbnail_url);
-    const fullUrl = safeHttpUrl(data.hdurl || data.url);
-    if (imageUrl) {
-      img.src = imageUrl;
-      img.alt = data.title || 'Astronomy Picture of the Day';
-      img.style.display = 'block';
-      ph.style.display = 'none';
-    } else {
-      img.style.display = 'none';
-      ph.style.display = 'block';
-      ph.textContent = "TODAY'S APOD IS A VIDEO — OPEN IT BELOW";
-    }
-    document.getElementById('apod-title').textContent = data.title || '--';
-    document.getElementById('apod-date').textContent = data.date || '--';
-    document.getElementById('apod-credit').textContent = data.copyright || 'NASA (public domain)';
-    document.getElementById('apod-explanation').textContent = data.explanation || '';
-    if (fullUrl) {
-      link.href = fullUrl;
-      link.style.display = 'inline-block';
-    }
-    setSignal('apod-signal', 'optimal');
+    const data = await fetchJson('/api/sensors/nasa-gallery');
+    gallery.collections = data.collections;
+    const bar = document.getElementById('gallery-collections');
+    bar.replaceChildren(...Object.entries(data.collections).map(([key, meta]) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'co-btn small';
+      btn.dataset.collection = key;
+      btn.textContent = meta.label.toUpperCase();
+      btn.title = `NASA library search: "${meta.query}"`;
+      btn.addEventListener('click', () => showCollection(key));
+      return btn;
+    }));
+    await showCollection(data.default);
   } catch (err) {
-    img.style.display = 'none';
-    ph.style.display = 'block';
-    ph.textContent = `NO SIGNAL: ${err.message || err}`;
-    setSignal('apod-signal', 'none');
+    gallery.collections = null;
+    galleryOffline(err);
   }
 }
+
+function galleryOffline(err) {
+  const ph = document.getElementById('gallery-placeholder');
+  ph.textContent = `NO SIGNAL: ${err.message || err}`;
+  ph.style.display = 'block';
+  setSignal('gallery-signal', 'none');
+}
+
+async function showCollection(key) {
+  gallery.key = key;
+  document.querySelectorAll('#gallery-collections .co-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.collection === key);
+    b.setAttribute('aria-pressed', String(b.dataset.collection === key));
+  });
+  const ph = document.getElementById('gallery-placeholder');
+  ph.textContent = 'DOWNLINKING IMAGERY…';
+  ph.style.display = 'block';
+  try {
+    const data = await fetchJson(`/api/sensors/nasa-gallery/${encodeURIComponent(key)}`);
+    if (gallery.key !== key) return; // another collection was picked meanwhile
+    gallery.items = data.items;
+    renderGalleryStrip();
+    if (gallery.items.length === 0) {
+      ph.textContent = 'NO RECENT IMAGES IN THIS COLLECTION';
+      return;
+    }
+    setSignal('gallery-signal', 'optimal');
+    showGalleryImage(0);
+  } catch (err) {
+    galleryOffline(err);
+  }
+}
+
+function renderGalleryStrip() {
+  const strip = document.getElementById('gallery-strip');
+  strip.replaceChildren(...gallery.items.map((item, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'gallery-thumb';
+    btn.title = item.title;
+    btn.setAttribute('aria-label', `${item.title} (${item.date})`);
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    const thumb = safeHttpUrl(item.thumb_url);
+    if (thumb) img.src = thumb;
+    btn.appendChild(img);
+    btn.addEventListener('click', () => showGalleryImage(i));
+    return btn;
+  }));
+}
+
+function showGalleryImage(index) {
+  const n = gallery.items.length;
+  if (n === 0) return;
+  gallery.index = ((index % n) + n) % n;
+  const item = gallery.items[gallery.index];
+
+  const img = document.getElementById('gallery-img');
+  const ph = document.getElementById('gallery-placeholder');
+  const src = safeHttpUrl(item.image_url);
+  img.classList.remove('ready');
+  img.onload = () => { img.classList.add('ready'); ph.style.display = 'none'; };
+  img.onerror = () => { ph.textContent = 'IMAGE UNAVAILABLE'; ph.style.display = 'block'; };
+  img.alt = item.title;
+  if (src) img.src = src;
+
+  // Warm the cache for the next image so stepping forward is instant.
+  const next = gallery.items[(gallery.index + 1) % n];
+  if (next && safeHttpUrl(next.image_url)) new Image().src = next.image_url;
+
+  document.getElementById('gallery-counter').textContent = `${String(gallery.index + 1).padStart(2, '0')} / ${String(n).padStart(2, '0')}`;
+  document.getElementById('gallery-caption').textContent = `${item.date} · ${item.center || 'NASA'}`;
+  document.getElementById('gallery-title').textContent = item.title || '--';
+  document.getElementById('gallery-date').textContent = item.date || '--';
+  document.getElementById('gallery-center').textContent = item.center || '--';
+  document.getElementById('gallery-credit').textContent = item.photographer || 'NASA';
+  document.getElementById('gallery-description').textContent = item.description || '';
+
+  const link = document.getElementById('gallery-link');
+  const details = safeHttpUrl(item.details_url);
+  link.hidden = !details;
+  if (details) link.href = details;
+
+  document.querySelectorAll('#gallery-strip .gallery-thumb').forEach((thumb, i) => {
+    const current = i === gallery.index;
+    thumb.setAttribute('aria-current', String(current));
+    if (current) thumb.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  });
+}
+
+document.getElementById('gallery-prev').addEventListener('click', () => showGalleryImage(gallery.index - 1));
+document.getElementById('gallery-next').addEventListener('click', () => showGalleryImage(gallery.index + 1));
+document.addEventListener('keydown', (event) => {
+  if (!document.getElementById('panel-gallery').classList.contains('active')) return;
+  if (event.target.closest('input, select, textarea')) return;
+  if (event.key === 'ArrowLeft') showGalleryImage(gallery.index - 1);
+  if (event.key === 'ArrowRight') showGalleryImage(gallery.index + 1);
+});
 
 // Credit line for the NASA library clip the stream source plays.
 fetchJson('/api/cv/footage')

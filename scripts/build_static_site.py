@@ -250,7 +250,9 @@ def capture_api(client: TestClient, site: SiteWriter) -> None:
     for key in backend.TELESCOPES:
         site.capture(client, f"sensors/telescopes/{key}")
     site.capture(client, "sensors/earth-epic")
-    site.capture(client, "sensors/apod")
+    site.capture(client, "sensors/nasa-gallery")
+    for key in backend.GALLERY_COLLECTIONS:
+        site.capture(client, f"sensors/nasa-gallery/{key}")
 
     site.capture(client, "imagery")
     site.capture(client, "earth/events")
