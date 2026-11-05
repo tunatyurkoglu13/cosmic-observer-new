@@ -323,6 +323,11 @@ async function identifyImage() {
 }
 
 startBtn.addEventListener('click', startStream);
+
+// The default source is recorded NASA footage, which is always available —
+// start it straight away instead of greeting visitors with a "NO SIGNAL"
+// screen. Live and uploaded sources still wait for an explicit START.
+if (document.getElementById('cv-source').value === 'nasa_footage') startStream();
 document.getElementById('cv-upload-btn').addEventListener('click', uploadVideo);
 document.getElementById('identify-btn').addEventListener('click', identifyImage);
 initCRTNoise(document.getElementById('cv-visual'));

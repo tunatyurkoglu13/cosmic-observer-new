@@ -7,7 +7,14 @@ from core.space_track_client import SpaceTrackClient
 from core.tle_manager import TLEManager
 
 
-def test_not_configured_without_credentials():
+@pytest.fixture
+def no_env_credentials(monkeypatch):
+    """Empty constructor args fall back to the environment; keep a developer's real .env out of these tests."""
+    monkeypatch.delenv("SPACE_TRACK_USERNAME", raising=False)
+    monkeypatch.delenv("SPACE_TRACK_PASSWORD", raising=False)
+
+
+def test_not_configured_without_credentials(no_env_credentials):
     client = SpaceTrackClient(username="", password="")
     assert client.is_configured is False
 
@@ -23,7 +30,7 @@ def test_configured_with_real_looking_credentials():
     assert client.is_configured is True
 
 
-def test_login_raises_when_not_configured():
+def test_login_raises_when_not_configured(no_env_credentials):
     client = SpaceTrackClient(username="", password="")
     with pytest.raises(RuntimeError, match="not configured"):
         client.login()

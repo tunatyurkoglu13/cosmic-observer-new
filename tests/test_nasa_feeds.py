@@ -248,3 +248,13 @@ def test_resolve_clip_url_picks_rendition_over_https():
     with patch("cv.nasa_footage.requests.get", return_value=_response(manifest)):
         url = nasa_footage.resolve_clip_url(clip)
     assert url.startswith("https://") and url.endswith("~large.mp4")
+
+
+def test_apod_rejects_placeholder_payload_without_caching_it(tmp_path):
+    raw = {"date": "2026-11-04", "title": "NASA Science", "media_type": "image", "explanation": "IC 342...",
+           "url": "https://science.nasa.gov/wp-content/themes/nasa-child/assets/images/nasa-logo@2x.png"}
+    client = apod.APODClient(cache_path=tmp_path / "a.json")
+    with patch("data.apod.requests.get", return_value=_response(raw)):
+        with pytest.raises(RuntimeError, match="placeholder"):
+            client.fetch_today()
+    assert client._load_cache(client.KEY) is None

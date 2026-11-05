@@ -1,3 +1,5 @@
+import json
+import urllib.parse
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -68,3 +70,20 @@ def test_fetch_latest_observation_live_both_telescopes():
         assert obs.instrument
         assert -90 <= obs.dec_deg <= 90
         assert 0 <= obs.ra_deg < 360
+
+
+def test_jwst_uses_longer_window_and_prefers_named_science_target(tmp_path):
+    rows = [
+        {"target_name": "NGC-1300", "s_ra": 49.9, "s_dec": -19.4, "t_min": 61330.0, "t_max": 61330.1,
+         "instrument_name": "NIRCAM/IMAGE", "proposal_id": 1, "obs_title": "Barred spirals"},
+        {"target_name": "UNKNOWN", "s_ra": 0, "s_dec": 0, "t_min": 61335.0, "t_max": 61335.1,
+         "instrument_name": "NIRSPEC", "proposal_id": 2, "obs_title": "Calibration"},
+    ]
+    with patch("data.space_telescopes.requests.post") as post:
+        post.return_value.json.return_value = {"data": rows}
+        obs = SpaceTelescopeClient(cache_dir=tmp_path).fetch_latest_observation("jwst")
+
+    assert obs.target_name == "NGC-1300"  # newer row is a placeholder target
+    sent = post.call_args.kwargs["data"]
+    window = json.loads(urllib.parse.unquote(sent.removeprefix("request=")))["params"]["filters"][1]["values"][0]
+    assert window["max"] - window["min"] == pytest.approx(30, abs=0.01)  # days, in MJD

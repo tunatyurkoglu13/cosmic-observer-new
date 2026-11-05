@@ -42,7 +42,7 @@ def _api_key() -> str:
     return os.environ.get("NASA_API_KEY") or "DEMO_KEY"
 
 
-def donki_get(endpoint: str, start: date, end: date, timeout: int = 30) -> list[dict]:
+def donki_get(endpoint: str, start: date, end: date, timeout: int = 60) -> list[dict]:
     resp = requests.get(
         f"{DONKI_BASE_URL}/{endpoint}",
         params={"startDate": start.isoformat(), "endDate": end.isoformat()},
@@ -129,7 +129,7 @@ def assess_storm(storm: dict) -> str | None:
 class DONKIClient(JsonFileFetcher[dict]):
     """Resilient-cached client for recent DONKI flares, CMEs and geomagnetic storms."""
 
-    def __init__(self, cache_path: Path | str = DEFAULT_CACHE_PATH, timeout: int = 30,
+    def __init__(self, cache_path: Path | str = DEFAULT_CACHE_PATH, timeout: int = 60,
                  staleness: timedelta = timedelta(minutes=30)):
         super().__init__(cache_path, staleness)
         self.timeout = timeout

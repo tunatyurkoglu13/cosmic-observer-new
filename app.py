@@ -64,6 +64,12 @@ from reports.risk_report import generate_risk_report
 from reports.statistics import compute_population_statistics
 from stm.cola import build_catalog_grid, find_cola_launch_windows, screen_launch_time
 from viz.dashboard_3d import add_ground_tracks, build_snapshot, snapshot_to_dict
+from dotenv import load_dotenv
+
+# Local runs pick up secrets (NASA_API_KEY, ...) from a git-ignored .env next
+# to this file; variables already set in the environment win, so Docker and
+# CI configuration is never overridden.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 # ---------------------------------------------------------------------------
 # Temporal layer — a background task that periodically samples a curated
@@ -961,6 +967,8 @@ def sensors_apod():
         return APODClient().fetch_today()
     except requests.RequestException:
         raise HTTPException(503, "NASA APOD is currently unreachable or rate-limited — try again shortly.")
+    except RuntimeError as e:  # APOD answered, but with placeholder data
+        raise HTTPException(503, str(e))
 
 
 # ---------------------------------------------------------------------------

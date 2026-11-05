@@ -37,16 +37,19 @@ MAST_INVOKE_URL = "https://mast.stsci.edu/api/v0/invoke"
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / "cache" / "space_telescopes"
 
 # This project's own keys -> MAST's own obs_collection values.
+# lookback: how far back to search for a recent observation — MAST archive
+# ingestion lag plus scheduling gaps mean a 1-day window can come back
+# empty. JWST's lag is much longer than Hubble's: its newest MAST rows
+# have been observed to trail real time by ~10 days, so an 8-day window
+# returns nothing at all.
 TELESCOPES = {
-    "hubble": {"display_name": "Hubble Space Telescope", "obs_collection": "HST"},
-    "jwst": {"display_name": "James Webb Space Telescope", "obs_collection": "JWST"},
+    "hubble": {"display_name": "Hubble Space Telescope", "obs_collection": "HST", "lookback": timedelta(days=8)},
+    "jwst": {"display_name": "James Webb Space Telescope", "obs_collection": "JWST", "lookback": timedelta(days=30)},
 }
 
-# How far back to search for a recent observation — MAST archive
-# ingestion lag plus scheduling gaps mean a 1-day window can come back
-# empty; wide enough to reliably find something without the query
-# getting so large it's slow.
-LOOKBACK = timedelta(days=8)
+# Calibration and engineering exposures carry placeholder target names;
+# a named science target is preferred when the window has one.
+PLACEHOLDER_TARGETS = {"", "UNKNOWN", "NONE"}
 
 
 def _datetime_to_mjd(dt: datetime) -> float:
@@ -98,7 +101,7 @@ class SpaceTelescopeClient(ResilientFetcher[TelescopeObservation]):
     def _fetch_live(self, key: str) -> TelescopeObservation:
         meta = TELESCOPES[key]
         now = datetime.now(timezone.utc)
-        window_start = now - LOOKBACK
+        window_start = now - meta["lookback"]
 
         mast_request = {
             "service": "Mast.Caom.Filtered",
@@ -123,9 +126,10 @@ class SpaceTelescopeClient(ResilientFetcher[TelescopeObservation]):
         payload = resp.json()
         rows = payload.get("data", [])
         if not rows:
-            raise RuntimeError(f"MAST returned no {meta['display_name']} observations in the last {LOOKBACK.days} days")
+            raise RuntimeError(f"MAST returned no {meta['display_name']} observations in the last {meta['lookback'].days} days")
 
-        latest = max(rows, key=lambda r: r.get("t_min", 0))
+        named = [r for r in rows if (r.get("target_name") or "").strip().upper() not in PLACEHOLDER_TARGETS]
+        latest = max(named or rows, key=lambda r: r.get("t_min", 0))
         end_mjd = latest.get("t_max") or latest.get("t_min", 0)
 
         return TelescopeObservation(
